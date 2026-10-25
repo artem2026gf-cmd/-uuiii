@@ -1,0 +1,1380 @@
+-- ragebot_part1.lua | Luau, Roblox, exec
+-- Часть 1/4: config, зависимости, entities, team, raycast, materials
+
+local Players = game:GetService('Players')
+local RunService = game:GetService('RunService')
+local HS = game:GetService('HttpService')
+local LP = Players.LocalPlayer
+local L = game:GetService('ReplicatedStorage')
+local Cam = workspace.CurrentCamera
+local UIS = game:GetService('UserInputService')
+
+local G = getgenv and getgenv() or _G
+G.ZbRage = G.ZbRage or {}
+local R = G.ZbRage
+
+-- ===== CONFIG =====
+R.aC = {
+    rage = false,
+    rageAutoFire = true,
+    rageAutowall = true,
+    rageHitbox = 'Head',
+    rageTargetMode = 'Distance',
+    rageMaxDist = math.huge,
+    rageMulti = false,
+    rageSticky = false,
+    rageScanHz = 30,
+    rageRemote = true,
+    rageIndicator = false,
+    minDmg = 20,
+    minDmgOverride = false,
+    minDmgOverrideValue = 5,
+    tapKill = false,
+    maxTaps = 3,
+    doubleTap = false,
+    wallbang = false,
+    wallLimit = false,
+    maxWalls = 1,
+    penMod = false,
+    penValue = 10,
+    backtrack = false,
+    backtrackMs = 200,
+    forwardTrack = false,
+    forwardMs = 100,
+    predictMs = 0,
+    bulletTp = false,
+    bulletTpDist = 2,
+    killAll = false,
+    killAllDelay = 0.1,
+    killAllWaitRound = true,
+    killAllLeadMs = 100,
+    loopKill = false,
+    loopTarget = nil,
+    forceBody = false,
+    missAdapt = false,
+    missesToBody = 2,
+    autoReload = false,
+    remoteReload = false,
+    reloadAt = 1,
+    teamCheck = true,
+    ignoreFriends = false,
+}
+
+-- ===== helpers =====
+function R.D(a)
+    return (a + math.pi) % (2 * math.pi) - math.pi
+end
+
+function R.m()
+    return LP:GetAttribute('IsPlayerChatting') or UIS:GetFocusedTextBox() ~= nil
+end
+
+function R.getCurrentCharacter()
+    local ok, mod = pcall(require, L.Controllers.CharacterController)
+    if ok then
+        local ok2, char = pcall(mod.getCurrentCharacter)
+        if ok2 then return char end
+    end
+    return LP.Character
+end
+
+-- ===== p() =====
+R.aw = nil
+pcall(function() R.aw = require(L.Classes.Character) end)
+
+function R.p()
+    if not R.aw then return nil end
+    local ok, slot = pcall(debug.getupvalue, R.aw.getInventorySlot, 1)
+    if ok and type(slot) == 'table' then
+        return rawget(slot, 'CurrentEquipped')
+    end
+    return nil
+end
+
+-- ===== entities =====
+R.aJ = nil
+pcall(function() R.aJ = require(L.Components.Common.Participants) end)
+
+local aL_cache = setmetatable({}, {__mode = 'k'})
+local function R_wrap(bot)
+    local cached = aL_cache[bot]
+    if cached then return cached end
+    cached = setmetatable({IsBot = true, UserId = 0}, {
+        __index = function(_, k)
+            if k == 'Character' then
+                local ok, v = pcall(R.aJ.Character, bot)
+                return ok and v or nil
+            elseif k == 'Name' or k == 'DisplayName' then
+                local ok, v = pcall(R.aJ.Name, bot)
+                return (ok and type(v) == 'string') and v or bot.Name
+            elseif k == 'Parent' then
+                return bot.Parent
+            end
+            return nil
+        end,
+    })
+    function cached.GetAttribute(self, k)
+        local v = bot:GetAttribute(k)
+        if v == nil then
+            local ok, char = pcall(R.aJ.Character, bot)
+            if ok and char then v = char:GetAttribute(k) end
+        end
+        return v
+    end
+    aL_cache[bot] = cached
+    return cached
+end
+
+R.aM, R.aN = -1, nil
+
+function R.entities()
+    local now = os.clock()
+    if R.aN and now - R.aM < 0.2 then return R.aN end
+    R.aM = now
+    local result = {}
+    if R.aJ then
+        local ok, all = pcall(R.aJ.GetAll)
+        if ok and type(all) == 'table' then
+            for _, ent in pairs(all) do
+                if typeof(ent) == 'Instance' then
+                    result[#result + 1] = ent:IsA('Player') and ent or R_wrap(ent)
+                end
+            end
+        end
+    end
+    if #result == 0 and not R.aJ then
+        for _, pl in ipairs(Players:GetPlayers()) do
+            if pl ~= LP then result[#result + 1] = pl end
+        end
+    end
+    if workspace:FindFirstChild('HordeShells') then
+        local shells = workspace.HordeShells
+        for _, m in ipairs(shells:GetChildren()) do
+            if m:IsA('Model') and m:GetAttribute('HordeId') ~= nil
+                and not m:GetAttribute('Ragdolled') and m:FindFirstChild('Head') then
+                result[#result + 1] = {
+                    IsZombie = true, IsBot = true, UserId = 0,
+                    Name = 'zombie', DisplayName = 'zombie',
+                    Character = m, Parent = m.Parent,
+                    GetAttribute = function(_, k) return m:GetAttribute(k) end,
+                }
+            end
+        end
+    end
+    R.aN = result
+    return result
+end
+
+function R.ownerOf(char)
+    if not char then return nil end
+    for _, pl in ipairs(R.entities()) do
+        if pl.Character == char then return pl end
+    end
+    return nil
+end
+
+function R.byName(name)
+    for _, pl in ipairs(R.entities()) do
+        if pl.Name == name then return pl end
+    end
+    return nil
+end
+
+-- ===== team =====
+function R.h(p)
+    if p == LP then return false end
+    if type(p) == 'table' and p.IsZombie then return true end
+    if workspace:FindFirstChild('HordeShells') then return false end
+    if not R.aC.teamCheck then return true end
+    if workspace:GetAttribute('Gamemode') == 'Deathmatch' then return true end
+    local team = p:GetAttribute('Team')
+    return (team == 'Terrorists' or team == 'Counter-Terrorists') and team ~= LP:GetAttribute('Team')
+end
+
+function R.F(p, part)
+    local char = p.Character
+    if not char then return nil end
+    if char:GetAttribute('Dead') or char:GetAttribute('Ragdolled') then return nil end
+    local hp = char:GetAttribute('Health')
+    if type(hp) == 'number' and hp <= 0 then return nil end
+    if not char:IsDescendantOf(workspace) then return nil end
+    if not char:FindFirstChild(part or 'Head') then return nil end
+    return char
+end
+
+function R.t(p)
+    if p == nil then return false end
+    if p:GetAttribute('Invincible') == true then return true end
+    local owner = R.ownerOf(p)
+    return owner ~= nil and owner:GetAttribute('Invincible') == true
+end
+
+-- ===== friends =====
+R.aI_friends, R.aJ_friends = {}, setmetatable({}, {__mode = 'k'})
+
+local function dT(pl)
+    if pl == LP or R.aJ_friends[pl] ~= nil then return end
+    R.aJ_friends[pl] = false
+    task.spawn(function()
+        local ok, res = pcall(LP.IsFriendsWith, LP, pl.UserId)
+        R.aJ_friends[pl] = ok and res == true
+    end)
+end
+
+for _, pl in ipairs(Players:GetPlayers()) do dT(pl) end
+Players.PlayerAdded:Connect(dT)
+
+function R.ET(p)
+    if not R.h(p) or R.aI_friends[p.Name] then return false end
+    if R.aC.ignoreFriends and R.aJ_friends[p] then return false end
+    return true
+end
+
+-- ===== MT =====
+function R.MT(part)
+    for _, ent in ipairs(R.entities()) do
+        local char = ent.Character
+        if char and part:IsDescendantOf(char) then return ent end
+    end
+    return nil
+end
+
+function R.bT(worldPos, screenPos)
+    local sp, onScreen = Cam:WorldToViewportPoint(worldPos)
+    if not onScreen then return nil end
+    return (Vector2.new(sp.X, sp.Y) - screenPos).Magnitude
+end
+
+-- ===== raycast params =====
+R.a5 = RaycastParams.new()
+R.a5.FilterType = Enum.RaycastFilterType.Exclude
+R.a5.CollisionGroup = 'Bullet'
+
+R.a6 = RaycastParams.new()
+R.a6.FilterType = Enum.RaycastFilterType.Include
+R.a6.CollisionGroup = 'Bullet'
+
+R.a0 = nil
+R.a1 = {at = 0}
+pcall(function() R.a0 = require(L.Components.Common.GetRayIgnore) end)
+
+function R.GT()
+    local now = os.clock()
+    local char = LP.Character
+    if R.a1.list and R.a1.char == char and now - R.a1.at < 0.1 then return R.a1.list end
+    R.a1.at, R.a1.char = now, char
+    local list = {}
+    R.a1.list = list
+    if R.a0 then
+        local ok, res = pcall(R.a0)
+        if ok and type(res) == 'table' then
+            for _, v in ipairs(res) do list[#list + 1] = v end
+        end
+    end
+    list[#list + 1] = char
+    list[#list + 1] = Cam
+    return list
+end
+
+-- ===== ST / YT =====
+function R.ST(hit, exit)
+    return {
+        Instance = hit.Instance,
+        Position = hit.Position,
+        Normal = hit.Normal,
+        Material = hit.Material.Name,
+        Exit = exit == true,
+    }
+end
+
+function R.YT(inst, dir)
+    return {
+        Instance = inst, Position = inst.Position,
+        Normal = -dir, Material = inst.Material.Name, Exit = false,
+    }
+end
+
+-- ===== materials =====
+R.PEN_MAT = {
+    [Enum.Material.Plastic] = 10,
+    [Enum.Material.SmoothPlastic] = 10,
+    [Enum.Material.Wood] = 10,
+    [Enum.Material.WoodPlanks] = 10,
+    [Enum.Material.Cardboard] = 10,
+    [Enum.Material.Glass] = 25,
+    [Enum.Material.Fabric] = 25,
+}
+R.PEN_VAR = {
+    ['Sandy Brick'] = 0,
+    IndoorWall = 0,
+}
+
+function R.BT(v)
+    if v ~= 0 then return v end
+    if workspace:GetAttribute('Map') == 'Reactor' then return -1 end
+    return v
+end
+
+function R.sT(part)
+    local parent = part.Parent
+    if parent and parent:HasTag('BreakableDoor') then return Enum.Material.Metal end
+    return part.Material
+end
+
+function R.gT(part)
+    return part:FindFirstAncestorWhichIsA('Accessory') ~= nil
+        or part:HasTag('CharacterAccessory')
+        or part.Name == 'CollisionCapsule'
+        or part.Name == 'HumanoidRootPart'
+end
+
+-- ===== server mode =====
+R.a7 = {server = false}
+pcall(function()
+    R.a7.router = require(L.Database.Security.Router)
+end)
+
+function R.a7.viewTick()
+    if not R.a7.router then return nil end
+    local ok, res = pcall(R.a7.router.broadcastRouter, 'GetRemoteViewTick')
+    return ok and (type(res) == 'number' and res) or nil
+end
+
+pcall(function()
+    local raycast = require(L.Shared.Raycast)
+    if type(raycast) == 'table' and type(rawget(raycast, 'castThroughDistance')) == 'function' then
+        R.a7.server = true
+    end
+end)
+
+task.spawn(function()
+    for i = 1, 40 do
+        if R.a7.server then return end
+        if R.a7.viewTick() then
+            R.a7.server = true
+            return
+        end
+        task.wait(3)
+    end
+end)
+
+function R.uT(props)
+    if R.a7.server then return props and props.Penetration or 0 end
+    if R.aC.wallLimit then return math.huge end
+    if R.aC.penMod then return R.aC.penValue end
+    return props and props.Penetration or 0
+end
+
+print('[rage 1/4] база загружена')
+      -- ragebot_part2.lua | Luau, Roblox, exec
+-- Часть 2/4: UT (raycast pen), DT, mT, jT, kT, урон, R calibration
+
+local Players = game:GetService('Players')
+local HS = game:GetService('HttpService')
+local LP = Players.LocalPlayer
+local L = game:GetService('ReplicatedStorage')
+local Cam = workspace.CurrentCamera
+
+local G = getgenv and getgenv() or _G
+local R = G.ZbRage
+if not R then error('Запусти часть 1') end
+
+local aC = R.aC
+
+-- ===== UT =====
+function R.UT(origin, dir, maxDist, penValue, char, includeChars)
+    R.a5.FilterDescendantsInstances = R.GT()
+    if includeChars then
+        local chars = workspace:FindFirstChild('Characters')
+        if chars then R.a5:AddToFilter(chars) end
+    end
+
+    local hits, thickness, wallCount = {}, {}, 0
+    local currentOrigin = origin
+
+    for i = 1, 64 do
+        local remain = maxDist - (currentOrigin - origin).Magnitude
+        if remain <= 0 then break end
+
+        local hit = workspace:Raycast(currentOrigin, dir * remain, R.a5)
+        if not hit then break end
+
+        R.a5:AddToFilter(hit.Instance)
+        if not R.gT(hit.Instance) then
+            hits[#hits + 1] = R.ST(hit)
+
+            if char and hit.Instance:IsDescendantOf(char) then
+                return hits, true, wallCount
+            end
+
+            if penValue == math.huge then
+                wallCount = wallCount + 1
+                currentOrigin = hit.Position + dir * 0.01
+            else
+                R.a6.FilterDescendantsInstances = {hit.Instance}
+                local farPoint = hit.Position + dir * 1000
+                local exitHit = workspace:Raycast(farPoint, hit.Position - farPoint, R.a6)
+                if not exitHit then
+                    return hits, false, wallCount, true
+                end
+
+                local thick = (hit.Position - exitHit.Position).Magnitude
+                local variant = hit.Instance.MaterialVariant
+                local limit
+
+                if variant ~= '' and R.PEN_VAR[variant] ~= nil then
+                    thickness[variant] = (thickness[variant] or 0) + thick
+                    limit = R.BT(R.PEN_VAR[variant]) + penValue
+                    if thickness[variant] > limit then return hits, false, wallCount, true end
+                else
+                    local mat = R.sT(hit.Instance)
+                    thickness[mat] = (thickness[mat] or 0) + thick
+                    limit = R.BT(R.PEN_MAT[mat] or 0) + penValue
+                    if thickness[mat] > limit then return hits, false, wallCount, true end
+                end
+
+                hits[#hits + 1] = R.ST(exitHit, true)
+                wallCount = wallCount + 1
+                currentOrigin = exitHit.Position + dir * 0.001
+            end
+        end
+    end
+    return hits, false, wallCount
+end
+
+function R.DT(origin, dir, maxDist, penValue, char, wallbang)
+    local charParent = char and char.Parent
+    local hits, blocked = R.UT(origin, dir, maxDist, penValue, charParent)
+    if wallbang and not R.a7.server and char and not blocked then
+        hits[#hits + 1] = R.YT(char, dir)
+    end
+    return hits
+end
+
+function R.mT(from, to, maxDist, penValue)
+    local delta = to - from
+    local dist = delta.Magnitude
+    if dist < 0.05 or dist > maxDist then return false, 0 end
+    local hits, blocked, wallCount, hard = R.UT(from, delta.Unit, dist, penValue, nil, true)
+    if hard then return false, wallCount end
+    return true, wallCount, hits
+end
+
+function R.jT(from, to, part, maxDist, penValue, wallbang)
+    local ok, wallCount, hits = R.mT(from, to, maxDist, penValue)
+    if not ok then
+        if not wallbang or R.a7.server then return nil end
+        hits = {}
+    end
+    local dir = (to - from).Unit
+    hits[#hits + 1] = {
+        Instance = part, Position = to,
+        Normal = -dir, Material = part.Material.Name, Exit = false,
+    }
+    return hits
+end
+
+function R.kT(origin, hits)
+    local last = origin
+    for _, h in ipairs(hits) do
+        h.Distance = (h.Position - last).Magnitude
+        last = h.Position
+    end
+    return hits
+end
+
+-- ===== урон =====
+R.PART_TO_ZONE = {
+    Head = 'Head', UpperTorso = 'Torso', LowerTorso = 'Torso',
+    HumanoidRootPart = 'Torso', Torso = 'Torso',
+    LeftUpperArm = 'Arms', LeftLowerArm = 'Arms', LeftHand = 'Arms',
+    RightUpperArm = 'Arms', RightLowerArm = 'Arms', RightHand = 'Arms',
+    LeftUpperLeg = 'Legs', LeftLowerLeg = 'Legs', LeftFoot = 'Legs',
+    RightUpperLeg = 'Legs', RightLowerLeg = 'Legs', RightFoot = 'Legs',
+}
+
+function R.armorOf(player)
+    local raw = player:GetAttribute('Armor')
+    if type(raw) ~= 'string' then return 0, false end
+    local ok, data = pcall(HS.JSONDecode, HS, raw)
+    if not ok or type(data) ~= 'table' then return 0, false end
+    return tonumber(data.Health) or 0,
+        type(data.Type) == 'string' and data.Type:find('Helmet') ~= nil
+end
+
+function R.calcDamage(weapon, partName, dist, walls, player)
+    local zone = R.PART_TO_ZONE[partName]
+    local dmgPerPart = weapon.DamagePerPart
+    if not zone or type(dmgPerPart) ~= 'table' or not dmgPerPart[zone] then return 0 end
+
+    local dmg = dmgPerPart[zone]
+    dmg = dmg * (weapon.RangeModifier or 1) ^ ((dist / 0.075) / 500)
+    if walls > 0 then dmg = dmg * (weapon.WallbangMultiplier or 0.5) ^ walls end
+
+    local armor, helmet = R.armorOf(player)
+    if armor > 0 and (zone ~= 'Legs' and (zone ~= 'Head' or helmet)) then
+        dmg = dmg * (weapon.ArmorPenetration or 1)
+    end
+    return dmg * (weapon.BulletsPerShot or 1)
+end
+
+function R.E(from, part, char, penValue, maxDist)
+    local dir = (part.Position - from).Unit
+    local hits, blocked, wallCount = R.UT(from, dir, maxDist, penValue, char)
+    if blocked then
+        if wallCount > 0 and not aC.rageAutowall
+            and (R.a7.server or (not aC.wallbang and not aC.wallLimit)) then
+            return false, 0
+        end
+        return true, wallCount
+    end
+    if aC.wallbang and not R.a7.server then
+        local _, _, walls = R.UT(from, dir, maxDist, math.huge, char)
+        return true, walls
+    end
+    return false, 0
+end
+
+function R.vehiclePos()
+    local char = R.getCurrentCharacter()
+    return char and char.CFrame or Cam.CFrame
+end
+
+-- ===== R calibration =====
+R.aZ = {
+    factor = {}, samples = {},
+    key = function(name, zone, walls)
+        return name .. '|' .. zone .. '|' .. (walls > 0 and 'wall' or 'open')
+    end,
+    get = function(key) return math.clamp(R.aZ.factor[key] or 1, 0.6, 1.4) end,
+    expect = function(player, key, raw)
+        R.aZ.meta[player] = {key = key, raw = raw, at = os.clock()}
+    end,
+    meta = {},
+}
+
+function R.R(weapon, partName, walls, rawDmg)
+    local key = R.aZ.key(weapon.Name, R.PART_TO_ZONE[partName], walls)
+    if R.a7.server then return rawDmg, key end
+    return rawDmg * R.aZ.get(key), key
+end
+
+-- ===== bullet TP =====
+R.a9 = {params = RaycastParams.new(), last = setmetatable({}, {__mode = 'k'})}
+R.a9.params.FilterType = Enum.RaycastFilterType.Exclude
+R.a9.params.CollisionGroup = 'Bullet'
+
+function R.EU(part)
+    if not aC.bulletTp or not part or not part.Parent then return nil end
+    local origin = part.Position
+    local toChar = R.vehiclePos().Position - origin
+    local flat = Vector3.new(toChar.X, 0, toChar.Z)
+    flat = flat.Magnitude > 0.01 and flat.Unit or Vector3.new(0, 0, 1)
+
+    local right = flat:Cross(Vector3.new(0, 1, 0))
+    local dist = aC.bulletTpDist
+    local dirs = {flat, (flat + Vector3.new(0,1,0)).Unit, Vector3.new(0,1,0),
+                  right, -right, (flat + right).Unit, (flat - right).Unit, -flat}
+
+    R.a9.params.FilterDescendantsInstances = R.GT()
+    local parent = part.Parent
+    local lastDir = R.a9.last[part] or 1
+
+    for i = 0, #dirs - 1 do
+        local idx = ((lastDir - 1) + i) % #dirs + 1
+        local dir = dirs[idx]
+        local pos = origin + dir * dist
+        local hit = workspace:Raycast(pos, dir * -(dist + 2), R.a9.params)
+        if hit and hit.Instance:IsDescendantOf(parent) then
+            R.a9.last[part] = idx
+            return pos
+        end
+    end
+    return nil
+end
+
+function R.LT()
+    local aH = R.aH or {}
+    local cf = aH.active and aH.eye or Cam.CFrame
+    return cf.Position
+end
+
+print('[rage 2/4] урон и pen загружены')
+      -- ragebot_part3.lua | Luau, Roblox, exec
+-- Часть 3/4: трекеры (velocity/history), q() target scan, N() throttler
+
+local Players = game:GetService('Players')
+local RunService = game:GetService('RunService')
+local LP = Players.LocalPlayer
+local L = game:GetService('ReplicatedStorage')
+local Cam = workspace.CurrentCamera
+
+local G = getgenv and getgenv() or _G
+local R = G.ZbRage
+if not R then error('Запусти часть 1') end
+
+local aC = R.aC
+
+-- ===== трекеры =====
+R.ba_vel, R.bb_hist = setmetatable({}, {__mode = 'k'}), setmetatable({}, {__mode = 'k'})
+R.HISTORY_SEC = 0.6
+R.aK = setmetatable({}, {__mode = 'k'})  -- miss counter
+
+RunService.Heartbeat:Connect(function(dt)
+    if dt <= 0 then return end
+    local parts = {
+        'Head','UpperTorso','LowerTorso','HumanoidRootPart',
+        'LeftUpperArm','LeftLowerArm','LeftHand',
+        'RightUpperArm','RightLowerArm','RightHand',
+        'LeftUpperLeg','LeftLowerLeg','LeftFoot',
+        'RightUpperLeg','RightLowerLeg','RightFoot',
+    }
+    local prevPos = setmetatable({}, {__mode = 'k'})
+    for _, ent in ipairs(R.entities()) do
+        local char = ent ~= LP and ent.Character
+        local hrp = char and char:FindFirstChild('HumanoidRootPart')
+        if hrp then
+            local pos = hrp.Position
+            local prev = prevPos[ent]
+            if prev then
+                local v = (pos - prev) / dt
+                if v.Magnitude > 80 then v = Vector3.zero end
+                R.ba_vel[ent] = (R.ba_vel[ent] or v):Lerp(v, 0.35)
+            end
+            prevPos[ent] = pos
+            if aC.backtrack then
+                local hist = R.bb_hist[ent]
+                if not hist then hist = {}; R.bb_hist[ent] = hist end
+                local sample = {t = os.clock(), pos = {}}
+                for _, n in ipairs(parts) do
+                    local pt = char:FindFirstChild(n)
+                    if pt then sample.pos[n] = pt.Position end
+                end
+                hist[#hist + 1] = sample
+                while hist[1] and sample.t - hist[1].t > R.HISTORY_SEC do
+                    table.remove(hist, 1)
+                end
+            elseif R.bb_hist[ent] then
+                R.bb_hist[ent] = nil
+            end
+        else
+            prevPos[ent], R.ba_vel[ent] = nil, nil
+        end
+    end
+end)
+
+function R.zU(part)
+    local ms = aC.predictMs or 0
+    if ms <= 0 or not part.Parent then return part.Position end
+    local owner = R.ownerOf(part.Parent)
+    local vel = owner and R.ba_vel[owner]
+    if not vel then return part.Position end
+    return part.Position + Vector3.new(vel.X, vel.Y * 0.5, vel.Z) * (ms / 1000)
+end
+
+-- ===== hitbox list =====
+R.HITBOX_LIST = {
+    Head = {'Head'},
+    Body = {'UpperTorso','LowerTorso','HumanoidRootPart'},
+    Multipoint = {'Head','UpperTorso','LowerTorso','HumanoidRootPart'},
+    ['Full Body'] = {
+        'Head','UpperTorso','LowerTorso',
+        'LeftUpperArm','LeftLowerArm','LeftHand',
+        'RightUpperArm','RightLowerArm','RightHand',
+        'LeftUpperLeg','LeftLowerLeg','LeftFoot',
+        'RightUpperLeg','RightLowerLeg','RightFoot',
+    },
+}
+
+function R.l()
+    return aC.minDmgOverride and aC.minDmgOverrideValue or aC.minDmg
+end
+
+local lastTargetPlayer = nil
+local targetRotation = 0
+R.misAdaptCount = R.misAdaptCount or setmetatable({}, {__mode = 'k'})
+
+function R.q(weapon)
+    local startTime = os.clock()
+    local origin = R.LT()
+    local props = weapon.Properties
+    local penValue = R.uT(props)
+    local maxDist = props.Range or 500
+    local hitboxList = R.HITBOX_LIST[aC.rageHitbox] or R.HITBOX_LIST.Head
+    if aC.forceBody then hitboxList = R.HITBOX_LIST.Body end
+
+    local minDmg = R.l()
+    local candidates = {}
+    local screenCenter = Cam.ViewportSize / 2
+
+    for _, ent in ipairs(R.entities()) do
+        if R.ET(ent) then
+            local char = R.F(ent, 'HumanoidRootPart')
+            if char and not R.t(char) then
+                local dist = (char.HumanoidRootPart.Position - origin).Magnitude
+                local score
+                if aC.rageTargetMode == 'Crosshair' then
+                    score = R.bT(char.HumanoidRootPart.Position, screenCenter) or math.huge
+                elseif aC.rageTargetMode == 'Lowest HP' then
+                    score = (tonumber(char:GetAttribute('Health')) or 100) + dist / 10000
+                else
+                    score = dist
+                end
+                if aC.rageSticky and ent == R.lastTargetPlayer then
+                    score = -math.huge
+                end
+                candidates[#candidates + 1] = {
+                    player = ent, char = char, dist = dist,
+                    hp = tonumber(char:GetAttribute('Health')) or 100,
+                    score = score,
+                }
+            end
+        end
+    end
+
+    table.sort(candidates, function(a, b) return a.score < b.score end)
+
+    local output, total = {}, #candidates
+    local startIdx = targetRotation <= total and targetRotation or 1
+    targetRotation = 1
+
+    for idx = 0, total - 1 do
+        local candIdx = ((startIdx - 1) + idx) % total + 1
+        local cand = candidates[candIdx]
+
+        if idx > 0 and os.clock() - startTime > 0.004 then
+            targetRotation = candIdx
+            break
+        end
+
+        local hpTarget, hitbox = cand.hp, hitboxList
+        if aC.missAdapt and (R.aK[cand.player] or 0) >= aC.missesToBody then
+            hitbox = R.HITBOX_LIST.Body
+        end
+
+        local best, bestBody = {dmg = 0}, {dmg = 0}
+
+        for _, partName in ipairs(hitbox) do
+            local part = cand.char:FindFirstChild(partName)
+            if part then
+                local tpPos = R.EU(part)
+                local visible, walls = tpPos ~= nil, 0
+
+                if not tpPos then
+                    tpPos = origin
+                    visible, walls = R.E(origin, part, cand.char, penValue, maxDist)
+                    if visible and aC.wallLimit and walls > aC.maxWalls then
+                        visible = false
+                    end
+                end
+
+                if visible then
+                    local track = tpPos ~= origin and 'TP' or nil
+                    local rawDmg = R.calcDamage(props, partName,
+                        (part.Position - tpPos).Magnitude,
+                        (aC.wallLimit and not R.a7.server) and 0 or walls,
+                        cand.player)
+                    local dmg, key = R.R(weapon, partName, walls, rawDmg)
+
+                    if dmg > best.dmg then
+                        best = {
+                            part = part, dmg = dmg, raw = rawDmg,
+                            key = key, walls = walls, track = track,
+                        }
+                    end
+                    if R.PART_TO_ZONE[partName] == 'Torso' and dmg > bestBody.dmg then
+                        bestBody = {
+                            part = part, dmg = dmg, raw = rawDmg,
+                            key = key, walls = walls, track = track,
+                        }
+                    end
+                    if bestBody.dmg >= hpTarget
+                        or (best.dmg >= hpTarget and not aC.preferBodyLethal) then
+                        break
+                    end
+                end
+            end
+        end
+
+        if aC.preferBodyLethal and bestBody.part and bestBody.dmg >= hpTarget then
+            best = bestBody
+        end
+
+        local minHp = hpTarget <= minDmg and 0 or minDmg
+
+        if not R.a7.server
+            and not (best.part and (best.dmg >= minHp or best.dmg >= hpTarget))
+            and (aC.backtrack or aC.forwardTrack) then
+
+            local function try(d, p, pos, track)
+                local ok, walls = R.mT(origin, pos, maxDist, penValue)
+                if not ok or (walls > 0 and (not aC.rageAutowall and (not aC.wallbang and not aC.wallLimit))) then
+                    return
+                end
+                if aC.wallLimit and walls > aC.maxWalls then return end
+                local rawDmg = R.calcDamage(props, d, (pos - origin).Magnitude,
+                    aC.wallLimit and 0 or walls, cand.player)
+                local dmg, key = R.R(weapon, d, walls, rawDmg)
+                if dmg > best.dmg then
+                    best = {
+                        part = p, dmg = dmg, raw = rawDmg,
+                        key = key, walls = walls, pos = pos, track = track,
+                    }
+                end
+            end
+
+            if aC.backtrack then
+                local hist = R.bb_hist[cand.player]
+                local now = os.clock()
+                if hist then
+                    for i = #hist - 1, 1, -2 do
+                        local sample = hist[i]
+                        local age = now - sample.t
+                        if age > aC.backtrackMs / 1000 then break end
+                        if os.clock() - startTime > 0.004 then break end
+
+                        for _, partName in ipairs(hitbox) do
+                            local part = cand.char:FindFirstChild(partName)
+                            local pos = sample.pos[partName]
+                            if part and pos then
+                                try(partName, part, pos, ('BT %dms'):format(age * 1000))
+                            end
+                        end
+
+                        if best.pos and (best.dmg >= minHp or best.dmg >= hpTarget) then break end
+                    end
+                end
+            end
+
+            if aC.forwardTrack and not (best.pos and (best.dmg >= minHp or best.dmg >= hpTarget)) then
+                local vel = R.ba_vel[cand.player]
+                if vel and vel.Magnitude > 1 then
+                    for _, mult in ipairs({0.5, 1}) do
+                        if os.clock() - startTime > 0.004 then break end
+                        local lead = (aC.forwardMs * mult) / 1000
+                        for _, partName in ipairs(hitbox) do
+                            local part = cand.char:FindFirstChild(partName)
+                            if part then
+                                try(partName, part, part.Position + vel * lead,
+                                    ('FT %dms'):format(lead * 1000))
+                            end
+                        end
+                        if best.pos and (best.dmg >= minHp or best.dmg >= hpTarget) then break end
+                    end
+                end
+            end
+        end
+
+        if best.part and (best.dmg >= minHp or best.dmg >= hpTarget) then
+            best.player, best.char, best.hp = cand.player, cand.char, hpTarget
+            output[#output + 1] = best
+            if not aC.rageMulti then break end
+        end
+    end
+
+    R.lastTargetPlayer = output[1] and output[1].player or nil
+    return output
+end
+
+-- ===== N throttler =====
+local bn, bo = {}, 0
+
+function R.N(weapon)
+    local now = os.clock()
+    if now - bo >= 1 / math.max(aC.rageScanHz, 1) then
+        bo = now
+        bn = R.q(weapon)
+    else
+        for i = #bn, 1, -1 do
+            local t = bn[i]
+            if not t.part.Parent or t.char:GetAttribute('Dead') or R.t(t.char) then
+                table.remove(bn, i)
+            end
+        end
+    end
+    return bn
+end
+
+print('[rage 3/4] q() и N() загружены')
+              -- ragebot_part4.lua | Luau, Roblox, exec
+-- Часть 4/4: xU (выстрел), yU (reload), qU (equip), killAll, GUI
+
+local Players = game:GetService('Players')
+local RunService = game:GetService('RunService')
+local UIS = game:GetService('UserInputService')
+local HS = game:GetService('HttpService')
+local LP = Players.LocalPlayer
+local L = game:GetService('ReplicatedStorage')
+local Cam = workspace.CurrentCamera
+
+local G = getgenv and getgenv() or _G
+local R = G.ZbRage
+if not R then error('Запусти часть 1') end
+
+local aC = R.aC
+local a2 = require(L.Database.Security.Remotes)
+
+-- ===== xU: SHOOT =====
+function R.xU(weapon, targetPart, wallbang, backtrackPos)
+    local props = weapon.Properties
+    if not (props and weapon.Identifier and targetPart) then return false end
+
+    local serverMode = R.a7.server
+    if serverMode then backtrackPos = nil end
+
+    local results = {}
+    local bulletOrigin = not backtrackPos and R.EU(targetPart) or R.LT()
+    local range = props.Range or 500
+    local penValue = R.uT(props)
+    local targetPos = backtrackPos or targetPart.Position
+    local dir = (targetPos - bulletOrigin).Unit
+    local bullets = {}
+
+    for i = 1, math.max(props.BulletsPerShot or 1, 1) do
+        local hits
+        if backtrackPos then
+            hits = R.jT(bulletOrigin, backtrackPos, targetPart, range, penValue, wallbang)
+            if not hits then return false end
+        else
+            hits = R.DT(bulletOrigin, dir, range, penValue, targetPart, wallbang)
+        end
+
+        if serverMode then
+            local last = hits[#hits]
+            if not (last and last.Instance and last.Instance:IsDescendantOf(targetPart.Parent)) then
+                return false
+            end
+            bullets[#bullets + 1] = {Direction = dir, Origin = bulletOrigin}
+        else
+            bullets[#bullets + 1] = {
+                Direction = dir, Origin = bulletOrigin,
+                Hits = R.kT(bulletOrigin, hits),
+            }
+        end
+        results[#results + 1] = hits
+    end
+
+    weapon.ShotSeq = (weapon.ShotSeq or 0) + 1
+
+    local payload = {
+        IsSniperScoped = weapon.IsSniperScoped,
+        ShootingHand = weapon.ShootingHand,
+        Identifier = weapon.Identifier,
+        Seq = weapon.ShotSeq,
+        Bullets = bullets,
+        ViewTick = serverMode and R.a7.viewTick() or nil,
+        __pastahubblox = results,
+    }
+
+    local ok = pcall(a2.Inventory.ShootWeapon.Send, payload)
+    if ok then
+        weapon.Rounds = math.max((weapon.Rounds or 1) - 1, 0)
+        weapon.RechargeStartTime = workspace:GetServerTimeNow()
+    end
+    return ok
+end
+
+-- ===== lU: killAll round check =====
+local gameState
+pcall(function() gameState = require(L.Database.Components.GameState) end)
+
+function R.lU()
+    if not aC.killAllWaitRound then return true end
+    if not gameState then return true end
+    local ok, state = pcall(gameState.GetStateAtTime,
+        workspace:GetServerTimeNow() + (aC.killAllLeadMs or 0) / 1000)
+    return ok and state == 'Round In Progress'
+end
+
+-- ===== yU: reload =====
+function R.yU(weapon)
+    local props = weapon.Properties
+    if not (props and props.Rounds and weapon.Identifier) then return false end
+
+    local isDM = workspace:GetAttribute('Gamemode') == 'Deathmatch'
+    local capacity = weapon.Capacity or 0
+    local missing = props.Rounds - (weapon.Rounds or 0)
+    local toAdd = isDM and missing or math.min(missing, capacity)
+
+    if toAdd <= 0 then return false end
+
+    local ok = pcall(a2.Inventory.ReloadWeapon.Send, {
+        Identifier = weapon.Identifier,
+        Capacity = capacity,
+        Rounds = weapon.Rounds,
+    })
+    if ok then
+        weapon.Rounds = (weapon.Rounds or 0) + toAdd
+        if not isDM then weapon.Capacity = capacity - toAdd end
+    end
+    return ok
+end
+
+-- ===== qU: equip check =====
+local be_cache = setmetatable({}, {__mode = 'k'})
+
+function R.qU(weapon)
+    local tick = weapon and weapon.WeaponEquippedTick
+    if type(tick) ~= 'number' then return true end
+    local delay = be_cache[weapon]
+    if not delay then
+        delay = 0.5
+        pcall(function()
+            local anim = weapon.Viewmodel.Animation:getAnimation('Equip')
+            if anim and type(anim.Length) == 'number' and anim.Length > 0 then
+                delay = anim.Length
+                be_cache[weapon] = delay
+            end
+        end)
+    end
+    return tick() - tick > delay * 0.925 + 0.03
+end
+
+-- ===== vU: fire click =====
+function R.FT(weapon)
+    local props = weapon and weapon.Properties
+    if not (aC.revolverAlt and props and props.ShootingOptions == 'Revolver') then return nil end
+    local fire = props.FireModes
+    return type(fire) == 'table' and (type(fire.Secondary) == 'table' and fire.Secondary) or nil
+end
+
+function R.vU(hold, weapon)
+    if hold then
+        if mouse1release then mouse1release() end
+        if mouse1press then mouse1press() end
+    elseif R.FT(weapon) and mouse2click then
+        mouse2click()
+    elseif mouse1click then
+        mouse1click()
+    end
+end
+
+function R.tT(weapon)
+    local alt = R.FT(weapon)
+    if alt and type(alt.FireRate) == 'number' then return alt.FireRate end
+    return weapon.Properties and weapon.Properties.FireRate or 0.1
+end
+
+-- ===== rU: knife =====
+function R.rU(weapon, player, part)
+    local props = weapon.Properties
+    local range = props and props.Range or 3
+    local origin = R.LT()
+    local delta = part.Position - origin
+    local dir = delta.Magnitude > 0 and delta.Unit or Cam.CFrame.LookVector
+
+    local ok = pcall(a2.Melee.MeleeAttack.Send, {
+        Direction = dir * range,
+        Material = part.Material.Name,
+        Distance = math.min(delta.Magnitude, range),
+        Instance = part,
+        Position = part.Position,
+        Normal = -dir,
+        MeleeAttack = 'BackStab',
+        Identifier = weapon.Identifier,
+    })
+    return ok
+end
+
+-- ===== knife killAll =====
+local knife_timer = setmetatable({}, {__mode = 'k'})
+
+RunService.Heartbeat:Connect(function()
+    if not aC.knifeKillAll or R.m() or not R.lU() then return end
+
+    local weapon = R.p()
+    local props = weapon and weapon.Properties
+    if not (props and weapon.Identifier and not weapon.Bullet and props.Class == 'Melee') then return end
+
+    local origin = R.LT()
+    local now = os.clock()
+
+    for _, ent in ipairs(R.entities()) do
+        if R.ET(ent) then
+            local char = R.F(ent, 'UpperTorso')
+            if char and not R.t(char) and now - (knife_timer[ent] or 0) >= aC.killAllDelay then
+                local part = char.UpperTorso
+                if part and (part.Position - origin).Magnitude <= aC.knifeReach then
+                    if R.rU(weapon, ent, part) then
+                        knife_timer[ent] = now
+                    end
+                end
+            end
+        end
+    end
+end)
+
+-- ===== main loop =====
+local bs, bt = 0, setmetatable({}, {__mode = 'k'})
+R.rageStatus = nil
+R.rageCands = 0
+R.bf, R.bg, R.bh = nil, nil, nil
+
+RunService.Heartbeat:Connect(function()
+    R.bf, R.bg, R.bh = nil, nil, nil
+
+    if R.m() then return end
+
+    local loopMode = aC.loopKill and aC.loopTarget ~= nil
+    local killAllMode = aC.killAll
+
+    if not aC.rage and not loopMode and not killAllMode then
+        R.rageStatus = nil
+        return
+    end
+
+    local weapon = R.p()
+    if not weapon or not weapon.Bullet or not weapon.Properties then
+        R.rageStatus = 'NO GUN'
+        return
+    end
+
+    -- killAll
+    if killAllMode and not weapon.IsReloading and R.lU() and R.qU(weapon) then
+        local now = os.clock()
+        for _, ent in ipairs(R.entities()) do
+            if R.ET(ent) then
+                local char = R.F(ent, 'Head')
+                if char and not R.t(char) and now - (bt[ent] or 0) >= aC.killAllDelay then
+                    if (weapon.Rounds or 0) <= 0 then R.yU(weapon) end
+                    if (weapon.Rounds or 0) <= 0 then break end
+                    if R.xU(weapon, char.Head, true) then
+                        bt[ent] = now
+                    end
+                end
+            end
+        end
+    end
+
+    -- loop kill
+    local loopPart = nil
+    if loopMode then
+        local ent = R.byName(aC.loopTarget)
+        local char = ent and R.F(ent, 'Head')
+        if char and not R.t(char) then
+            loopPart = char.Head
+        end
+    end
+
+    local targets = (not loopPart and aC.rage) and R.N(weapon) or {}
+
+    -- indicator (если включён)
+    if R.updateRageIndicator then
+        pcall(R.updateRageIndicator, not loopPart and targets[1] or nil)
+    end
+
+    R.bg = loopPart or (targets[1] and targets[1].part) or nil
+    R.bh = not loopPart and (targets[1] and targets[1].pos) or nil
+    R.bf = R.bh or (R.bg and R.bg.Position) or nil
+
+    if not R.bg then
+        R.rageStatus = (R.rageCands or 0) > 0 and 'NO LINE' or 'NO TARGET'
+        return
+    end
+
+    if not (loopPart or aC.rageAutoFire) then
+        R.rageStatus = 'AUTO OFF'
+        return
+    end
+
+    if (weapon.Rounds or 0) <= 0 or weapon.IsReloading then
+        R.rageStatus = weapon.IsReloading and 'RELOAD' or 'NO AMMO'
+        return
+    end
+
+    if not R.qU(weapon) then
+        R.rageStatus = 'EQUIP'
+        return
+    end
+
+    if aC.rageRemote or loopPart then
+        local now = os.clock()
+        local fireRate = R.tT(weapon)
+        if aC.rapidFire then
+            fireRate = fireRate / math.max(aC.rapidMult or 1, 1)
+        end
+
+        if now - bs < fireRate then
+            R.rageStatus = ('WAIT %.1f'):format(fireRate - (now - bs))
+            return
+        end
+
+        R.rageStatus = 'FIRE'
+        bs = now
+
+        local fireList = {}
+        if loopPart then
+            fireList[1] = {part = loopPart}
+        elseif aC.rageMulti then
+            fireList = targets
+        else
+            fireList[1] = targets[1]
+        end
+
+        local shots = {}
+        for _, t in ipairs(fireList) do
+            local count = 1
+            if aC.tapKill and t.hp and t.dmg and t.dmg > 0 then
+                count = math.clamp(math.ceil(t.hp / t.dmg), 1, aC.maxTaps)
+            end
+            if aC.doubleTap and count < 2 then count = 2 end
+            if count > 1 then t.key = nil end
+
+            for i = 1, count do
+                shots[#shots + 1] = t
+            end
+        end
+
+        local maxShots = fireRate == 0 and (weapon.Rounds or 1) or #shots
+        local shotIdx = 0
+
+        while shotIdx < maxShots do
+            local t = shots[shotIdx % #shots + 1]
+
+            if (weapon.Rounds or 0) <= aC.reloadAt and aC.autoReload and aC.remoteReload then
+                R.yU(weapon)
+            end
+            if (weapon.Rounds or 0) <= 0 then break end
+            if t.player and t.key then
+                R.aZ.expect(t.player, t.key, t.raw)
+            end
+
+            R.xU(weapon, t.part, loopPart ~= nil or aC.wallBang, t.pos)
+            shotIdx = shotIdx + 1
+        end
+
+        if aC.doubleTap and shotIdx >= 2 and fireRate > 0 then
+            bs = now + fireRate
+        end
+    elseif not aC.rapidFire and not weapon.IsShooting and not weapon.IsFireHeld then
+        R.vU(false, weapon)
+    end
+end)
+
+-- ===== rapid fire loop =====
+local rapidLast = 0
+RunService.Heartbeat:Connect(function()
+    if not aC.rapidFire or R.m() then return end
+    local weapon = R.p()
+    if not weapon or not weapon.Bullet or not weapon.Properties then return end
+    local held = weapon.IsFireHeld == true
+    local autoFire = aC.rage and aC.rageAutoFire and (R.bf ~= nil and not aC.rageRemote)
+    if not (held or autoFire) or (weapon.Rounds or 0) <= 0 or weapon.IsReloading then return end
+
+    local rate = aC.rapidUnlimited and 0 or (R.tT(weapon) / math.max(aC.rapidMult or 1, 1))
+    if os.clock() - rapidLast < rate then return end
+
+    if weapon.ShootDelayThread then pcall(task.cancel, weapon.ShootDelayThread) end
+    weapon.ShootDelayThread = nil
+    weapon.IsShooting = false
+    weapon.NextShotDue = 0
+    rapidLast = os.clock()
+
+    R.vU(held, weapon)
+end)
+
+-- ===== GUI =====
+local src
+for _, path in ipairs({'hub/windui.lua', 'windui.lua', 'pastahub/windui.lua'}) do
+    if not src and type(isfile) == 'function' then
+        local ok, data = pcall(readfile, path)
+        if ok and type(data) == 'string' and #data > 10000 then src = data end
+    end
+end
+if not src then
+    local ok, data = pcall(game.HttpGet, game, 'https://raw.githubusercontent.com/amazson/zaml/main/windui.lua', true)
+    if ok and type(data) == 'string' and #data > 10000 then
+        src = data
+        if type(writefile) == 'function' then
+            pcall(function()
+                if type(makefolder) == 'function' and type(isfolder) == 'function' and not isfolder('hub') then
+                    makefolder('hub')
+                end
+                writefile('hub/windui.lua', src)
+            end)
+        end
+    end
+end
+if not src then error('[rage] windui.lua не найден') end
+
+local UI = assert(loadstring(src, '=windui'))()
+UI:AddTheme({
+    Name = 'Tracers',
+    Accent = Color3.fromRGB(31, 12, 25), Dialog = Color3.fromRGB(31, 12, 25),
+    Background = Color3.fromRGB(26, 10, 20), Text = Color3.fromRGB(255, 234, 245),
+    Placeholder = Color3.fromRGB(201, 139, 174), Icon = Color3.fromRGB(249, 168, 212),
+    Button = Color3.fromRGB(219, 39, 119), Toggle = Color3.fromRGB(219, 39, 119),
+    Checkbox = Color3.fromRGB(219, 39, 119), Slider = Color3.fromRGB(244, 114, 182),
+    Primary = Color3.fromRGB(244, 114, 182), ElementBackground = Color3.fromRGB(42, 18, 34),
+    ElementBackgroundHover = Color3.fromRGB(58, 24, 48), WindowOutline = Color3.fromRGB(244, 114, 182),
+})
+
+local Window = UI:CreateWindow({
+    Title = 'ragebot', Author = 'standalone', Folder = 'hub',
+    Size = UDim2.fromOffset(500, 520), MinSize = Vector2.new(400, 400),
+    ToggleKey = Enum.KeyCode.RightShift, Theme = 'Tracers',
+    Transparent = false, Acrylic = false, OutlineThickness = 2, OutlineAnimated = false,
+    HideSearchBar = true, SideBarWidth = 160,
+})
+
+local Tab = Window:Tab({Title = 'rage', Icon = 'flame'})
+
+Tab:Section({Title = 'rage'})
+Tab:Toggle({ Title = 'ragebot', Value = false, Callback = function(v) aC.rage = v end })
+Tab:Toggle({ Title = 'auto fire', Value = true, Callback = function(v) aC.rageAutoFire = v end })
+Tab:Toggle({ Title = 'autowall', Value = true, Callback = function(v) aC.rageAutowall = v end })
+Tab:Dropdown({
+    Title = 'hitbox', Values = {'Head','Body','Multipoint','Full Body'}, Value = 'Head',
+    Callback = function(v) if type(v) == 'table' then v = v[1] end aC.rageHitbox = v end,
+})
+Tab:Dropdown({
+    Title = 'target selection', Values = {'Distance','Crosshair','Lowest HP'}, Value = 'Distance',
+    Callback = function(v) if type(v) == 'table' then v = v[1] end aC.rageTargetMode = v end,
+})
+Tab:Toggle({ Title = 'multi-target', Value = false, Callback = function(v) aC.rageMulti = v end })
+Tab:Toggle({ Title = 'prefer body lethal', Value = true, Callback = function(v) aC.preferBodyLethal = v end })
+Tab:Slider({ Title = 'scan rate (hz)', Value = {Min = 5, Max = 60, Default = 30}, Callback = function(v) aC.rageScanHz = v end })
+Tab:Slider({ Title = 'min damage', Value = {Min = 1, Max = 100, Default = 20}, Callback = function(v) aC.minDmg = v end })
+
+Tab:Section({Title = 'damage override'})
+Tab:Toggle({ Title = 'min damage override', Value = false, Callback = function(v) aC.minDmgOverride = v end })
+Tab:Slider({ Title = 'override value', Value = {Min = 1, Max = 100, Default = 5}, Callback = function(v) aC.minDmgOverrideValue = v end })
+
+Tab:Section({Title = 'tap / double'})
+Tab:Toggle({ Title = 'tap kill', Value = false, Callback = function(v) aC.tapKill = v end })
+Tab:Slider({ Title = 'max taps', Value = {Min = 1, Max = 10, Default = 3}, Callback = function(v) aC.maxTaps = v end })
+Tab:Toggle({ Title = 'double tap', Value = false, Callback = function(v) aC.doubleTap = v end })
+
+Tab:Section({Title = 'wallbang'})
+Tab:Toggle({ Title = 'wallbang', Value = false, Callback = function(v) aC.wallbang = v end })
+Tab:Toggle({ Title = 'wall limit', Value = false, Callback = function(v) aC.wallLimit = v end })
+Tab:Slider({ Title = 'max walls', Value = {Min = 1, Max = 10, Default = 1}, Callback = function(v) aC.maxWalls = v end })
+Tab:Toggle({ Title = 'pen mod', Value = false, Callback = function(v) aC.penMod = v end })
+Tab:Slider({ Title = 'pen value', Value = {Min = 1, Max = 50, Default = 10}, Callback = function(v) aC.penValue = v end })
+
+Tab:Section({Title = 'tracking'})
+Tab:Toggle({ Title = 'backtrack', Value = false, Callback = function(v) aC.backtrack = v end })
+Tab:Slider({ Title = 'backtrack ms', Value = {Min = 20, Max = 500, Default = 200}, Callback = function(v) aC.backtrackMs = v end })
+Tab:Toggle({ Title = 'forward track', Value = false, Callback = function(v) aC.forwardTrack = v end })
+Tab:Slider({ Title = 'forward ms', Value = {Min = 20, Max = 300, Default = 100}, Callback = function(v) aC.forwardMs = v end })
+Tab:Slider({ Title = 'predict ms', Value = {Min = 0, Max = 300, Default = 0}, Callback = function(v) aC.predictMs = v end })
+Tab:Toggle({ Title = 'bullet tp', Value = false, Callback = function(v) aC.bulletTp = v end })
+Tab:Slider({ Title = 'tp dist', Value = {Min = 1, Max = 10, Default = 2}, Callback = function(v) aC.bulletTpDist = v end })
+
+Tab:Section({Title = 'kill all'})
+Tab:Toggle({ Title = 'kill all', Value = false, Callback = function(v) aC.killAll = v end })
+Tab:Slider({ Title = 'delay (s)', Value = {Min = 0.01, Max = 1, Default = 0.1}, Step = 0.01, Callback = function(v) aC.killAllDelay = v end })
+Tab:Toggle({ Title = 'wait round', Value = true, Callback = function(v) aC.killAllWaitRound = v end })
+Tab:Toggle({ Title = 'loop kill', Value = false, Callback = function(v) aC.loopKill = v end })
+Tab:Input({ Title = 'loop target', Value = '', Placeholder = 'имя', Callback = function(v) aC.loopTarget = tostring(v or '') end })
+
+Tab:Section({Title = 'weapon'})
+Tab:Toggle({ Title = 'auto reload', Value = false, Callback = function(v) aC.autoReload = v end })
+Tab:Toggle({ Title = 'remote reload', Value = false, Callback = function(v) aC.remoteReload = v end })
+Tab:Slider({ Title = 'reload at', Value = {Min = 0, Max = 10, Default = 1}, Callback = function(v) aC.reloadAt = v end })
+
+Tab:Section({Title = 'misc'})
+Tab:Toggle({ Title = 'team check', Value = true, Callback = function(v) aC.teamCheck = v end })
+Tab:Toggle({ Title = 'ignore friends', Value = false, Callback = function(v) aC.ignoreFriends = v end })
+
+print('[rage 4/4] ragebot загружен')
