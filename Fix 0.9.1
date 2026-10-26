@@ -1,0 +1,1090 @@
+local G=getgenv()
+for _,k in ipairs({"AuroraHubV541","AuroraHubV54","AuroraHubV53","AuroraHubV531","AuroraHubV55"})do
+local a=G[k]
+if type(a)=="table" and type(a.Stop)=="function" then pcall(a.Stop)end
+end
+local P=game:GetService("Players")
+local R=game:GetService("RunService")
+local H=game:GetService("HttpService")
+local LP=P.LocalPlayer
+local A={Active=true,Connections={},Registry={},Targets={},Objects={},SoundMarkers={},ChamsOriginal={}}
+G.AuroraHubV55=A
+A.Players=P
+A.RunService=R
+A.Http=H
+A.LocalPlayer=LP
+A.Colors={
+["Ice Amethyst"]=Color3.fromRGB(195,175,255),
+["Lavender"]=Color3.fromRGB(195,175,255),
+["Ice Blue"]=Color3.fromRGB(165,225,255),
+["White"]=Color3.new(1,1,1),
+["Pink"]=Color3.fromRGB(255,160,220),
+["Mint"]=Color3.fromRGB(150,255,210)
+}
+A.Dark=Color3.fromRGB(35,16,43)
+A.C={enabled=false,mode="corners",glow=false,glowTransparency=.9,filled=false,filledTransparency=.45,outline=false,outlineTransparency=.8}
+A.HC={enabled=false,number=false,glow=false,glowTransparency=.8,outline=false,outlineTransparency=.5,width=4,gap=7,speed=12}
+A.SK={enabled=false,glow=false,glowTransparency=.8,outline=false,outlineTransparency=.5,thickness=1,color="Ice Amethyst"}
+A.TC={enabled=false,glow=false,glowTransparency=.8,outline=false,outlineTransparency=.5,color="Ice Amethyst"}
+A.NC={enabled=false,glow=false,glowTransparency=.75,outline=false,outlineTransparency=.35}
+A.DC={enabled=false,glow=false,glowTransparency=.75,outline=false,outlineTransparency=.35}
+A.WC={enabled=false,glow=false,glowTransparency=.75,outline=false,outlineTransparency=.35,color="Ice Amethyst"}
+A.SC={enabled=false,teamCheck=true,distance=60,life=3,merge=12,selfRange=16,playerRange=16}
+A.HandC={enabled=false,material="ForceField",transparency=.2,color="Ice Amethyst"}
+A.GunC={enabled=false,material="ForceField",transparency=.2,color="Ice Amethyst"}
+function A.Color(n)return A.Colors[n] or A.Colors["Ice Amethyst"]end
+function A.Connect(s,f)
+local c=s:Connect(f)
+table.insert(A.Connections,c)
+return c
+end
+function A.Root(c)
+if not c then return nil end
+return c:FindFirstChild("HumanoidRootPart") or c:FindFirstChild("UpperTorso") or c:FindFirstChild("Torso") or c:FindFirstChild("LowerTorso") or c.PrimaryPart or c:FindFirstChildWhichIsA("BasePart")
+end
+function A.Team(v)
+if not v then return nil end
+local ok,t=pcall(function()return v:GetAttribute("Team")end)
+if ok and type(t)=="string" and t~="" then return t end
+if v:IsA("Player") and v.Team then return v.Team.Name end
+return nil
+end
+function A.Enemy(c)
+if not c or c==LP.Character or c.Name==LP.Name then return false end
+local pl=P:GetPlayerFromCharacter(c) or P:FindFirstChild(c.Name)
+if pl==LP then return false end
+local mine=A.Team(LP.Character) or A.Team(LP)
+local theirs=A.Team(c) or A.Team(pl)
+if mine and theirs then return mine~=theirs end
+if pl then
+if LP.Team and pl.Team then return LP.Team~=pl.Team end
+return true
+end
+return c:GetAttribute("Bot")==true
+end
+function A.Health(c)
+local h=c and c:GetAttribute("Health")
+local m=c and c:GetAttribute("MaxHealth")
+local hum=c and c:FindFirstChildOfClass("Humanoid")
+if type(h)~="number" then h=hum and hum.Health or 100 end
+if type(m)~="number" or m<=0 then m=hum and hum.MaxHealth or 100 end
+return h,math.max(m,1)
+end
+function A.Valid(c)
+if not c or not c.Parent then return false end
+if c:GetAttribute("Dead")==true then return false end
+local folder=workspace:FindFirstChild("Characters")
+if folder and c.Parent~=folder then return false end
+local hp=A.Health(c)
+return hp>0 and A.Root(c)~=nil and A.Enemy(c)
+end
+function A.Collect()
+local result={}
+local folder=workspace:FindFirstChild("Characters")
+if folder then
+for _,c in ipairs(folder:GetChildren())do
+if c:IsA("Model")then result[c]=true end
+end
+else
+for _,pl in ipairs(P:GetPlayers())do
+if pl~=LP and pl.Character then result[pl.Character]=true end
+end
+end
+return result
+end
+function A.Bounds(c)
+local root=A.Root(c)
+if not root then return nil end
+local head=c:FindFirstChild("Head")
+local foot=c:FindFirstChild("LeftFoot") or c:FindFirstChild("RightFoot")
+local top=head and head.Position+Vector3.new(0,head.Size.Y*.65+.25,0) or root.Position+Vector3.new(0,3,0)
+local bottom=foot and foot.Position-Vector3.new(0,foot.Size.Y*.6+.2,0) or root.Position-Vector3.new(0,3,0)
+return top,bottom
+end
+function A.Project(cam,top,bottom)
+if not cam or not top or not bottom then return nil end
+local t=cam:WorldToViewportPoint(top)
+local b=cam:WorldToViewportPoint(bottom)
+if t.Z<=0 or b.Z<=0 then return nil end
+local h=math.abs(b.Y-t.Y)
+local w=h*.575
+local x=(t.X+b.X)*.5-w*.5
+local y=math.min(t.Y,b.Y)
+local size=cam.ViewportSize
+if h<4 or x+w<0 or x>size.X or y+h<0 or y>size.Y then return nil end
+return math.floor(x+.5),math.floor(y+.5),math.max(3,math.floor(w+.5)),math.max(4,math.floor(h+.5))
+end
+local gui=Instance.new("ScreenGui")
+gui.Name="AuroraVisualV55"
+gui.ResetOnSpawn=false
+gui.IgnoreGuiInset=true
+gui.DisplayOrder=9999
+gui.ZIndexBehavior=Enum.ZIndexBehavior.Global
+pcall(function()gui.Parent=game:GetService("CoreGui")end)
+if not gui.Parent then gui.Parent=LP:WaitForChild("PlayerGui")end
+A.VisualGui=gui
+function A.Frame(parent,color,z)
+local f=Instance.new("Frame")
+f.BorderSizePixel=0
+f.BackgroundColor3=color or A.Color("Ice Amethyst")
+f.BackgroundTransparency=0
+f.Visible=false
+f.ZIndex=z or 10
+f.Parent=parent or gui
+return f
+end
+function A.Position(f,x,y,w,h)
+if not f then return end
+f.Position=UDim2.fromOffset(x,y)
+f.Size=UDim2.fromOffset(math.max(0,w),math.max(0,h))
+end
+function A.Stroke(f,color,width)
+local s=Instance.new("UIStroke")
+s.Color=color or A.Dark
+s.Thickness=width or 1
+s.ApplyStrokeMode=Enum.ApplyStrokeMode.Border
+s.Parent=f
+return s
+end
+function A.Line(f,x1,y1,x2,y2,thickness)
+local dx=x2-x1
+local dy=y2-y1
+local len=math.sqrt(dx*dx+dy*dy)
+f.AnchorPoint=Vector2.new(.5,.5)
+f.Position=UDim2.fromOffset((x1+x2)*.5,(y1+y2)*.5)
+f.Size=UDim2.fromOffset(math.max(1,len),thickness or 1)
+f.Rotation=math.deg(math.atan2(dy,dx))
+f.Visible=true
+end
+function A.Stop()
+if not A.Active then return end
+A.Active=false
+for _,c in ipairs(A.Connections)do pcall(function()c:Disconnect()end)end
+if A.StopSound then pcall(A.StopSound)end
+if A.StopChams then pcall(A.StopChams)end
+if A.StopRenderer then pcall(A.StopRenderer)end
+pcall(function()gui:Destroy()end)
+pcall(function()if A.Window and A.Window.Destroy then A.Window:Destroy()end end)
+end
+local url="https://raw.githubusercontent.com/amazson/zaml/main/windui.lua"
+local src
+if readfile then
+for _,path in ipairs({"hub/windui.lua","windui.lua"})do
+local ok,data=pcall(readfile,path)
+if ok and type(data)=="string" and #data>100 then src=data break end
+end
+end
+if not src then src=game:HttpGet(url,true)end
+if writefile then
+pcall(function()
+if makefolder then pcall(makefolder,"hub")end
+writefile("hub/windui.lua",src)
+end)
+end
+local UI=assert(loadstring(src,"=windui"))()
+A.UI=UI
+UI:AddTheme({
+Name="Aurora",
+Accent="#1F0C19",
+Dialog="#1F0C19",
+Background="#1A0A14",
+Text="#FFEAF5",
+Placeholder="#C98BAE",
+Icon="#F9A8D4",
+Button="#DB2777",
+Toggle="#DB2777",
+Checkbox="#DB2777",
+Slider="#F472B6",
+Primary="#F472B6",
+ElementBackground="#2A1222",
+ElementBackgroundHover="#3A1830",
+WindowOutline="#F472B6"
+})
+local W=UI:CreateWindow({
+Title="hub",
+Author="template",
+Folder="hub",
+Size=UDim2.fromOffset(760,500),
+MinSize=Vector2.new(480,320),
+ToggleKey=Enum.KeyCode.K,
+Theme="Aurora",
+Transparent=false,
+Acrylic=false,
+OutlineThickness=4,
+OutlineAnimated=true,
+OutlineSpeed=90,
+HideSearchBar=false,
+SideBarWidth=190
+})
+A.Window=W
+A.Tabs={}
+for _,name in ipairs({"legit","rage","visuals","movement","misc","search"})do
+A.Tabs[name]=W:Tab({Title=name,Icon=name=="visuals" and "eye" or "settings"})
+end
+print("[AURORA HUB V5.5] 1 часть загружена")
+local A=assert(getgenv().AuroraHubV55,"Сначала запусти часть 1")
+local R=A.RunService
+local P=A.Players
+local LP=A.LocalPlayer
+local gui=A.VisualGui
+local Pos=A.Position
+local Line=A.Line
+local objects={}
+local function frame(parent,color,z)
+return A.Frame(parent,color,z)
+end
+local function segment(parent)
+local f=frame(parent)
+return f
+end
+local function newBox()
+local holder=frame(gui,Color3.new(1,1,1),10)
+holder.BackgroundTransparency=1
+local b={holder=holder,main={},glow={},outline={}}
+for i=1,8 do
+b.outline[i]=segment(holder)
+b.glow[i]=segment(holder)
+b.main[i]=segment(holder)
+end
+b.fill=frame(holder,A.Color("Ice Amethyst"),8)
+return b
+end
+local function hideBox(b)
+if b then b.holder.Visible=false end
+end
+local function drawBox(b,x,y,w,h,cfg,alpha)
+if not b then return end
+alpha=alpha or 0
+local color=A.Color("Ice Amethyst")
+local l=math.max(3,math.floor(math.min(w,h)*.23))
+local seg
+if cfg.mode=="full" then
+seg={
+{0,0,w,0},{w,0,w,h},{w,h,0,h},{0,h,0,0}
+}
+else
+seg={
+{0,0,l,0},{0,0,0,l},
+{w-l,0,w,0},{w,0,w,l},
+{0,h-l,0,h},{0,h,l,h},
+{w,h-l,w,h},{w-l,h,w,h}
+}
+end
+b.holder.Visible=true
+Pos(b.holder,x,y,w,h)
+b.fill.Visible=cfg.filled==true
+if cfg.filled then
+Pos(b.fill,0,0,w,h)
+b.fill.BackgroundColor3=color
+b.fill.BackgroundTransparency=math.clamp(cfg.filledTransparency+alpha,0,1)
+end
+for i=1,8 do
+local s=seg[i]
+local main=b.main[i]
+local glow=b.glow[i]
+local outline=b.outline[i]
+if s then
+main.BackgroundColor3=color
+main.BackgroundTransparency=alpha
+Line(main,s[1],s[2],s[3],s[4],1)
+glow.Visible=cfg.glow==true
+if cfg.glow then
+glow.BackgroundColor3=color
+glow.BackgroundTransparency=math.clamp(cfg.glowTransparency+alpha,0,1)
+Line(glow,s[1],s[2],s[3],s[4],4)
+end
+outline.Visible=cfg.outline==true
+if cfg.outline then
+outline.BackgroundColor3=A.Dark
+outline.BackgroundTransparency=math.clamp(cfg.outlineTransparency+alpha,0,1)
+Line(outline,s[1],s[2],s[3],s[4],3)
+end
+else
+main.Visible=false
+glow.Visible=false
+outline.Visible=false
+end
+end
+end
+A.NewBox=newBox
+A.DrawBox=drawBox
+local function newText()
+local t=Instance.new("TextLabel")
+t.BackgroundTransparency=1
+t.BorderSizePixel=0
+t.Font=Enum.Font.GothamBold
+t.TextSize=13
+t.TextColor3=A.Color("Lavender")
+t.TextStrokeColor3=A.Dark
+t.TextStrokeTransparency=1
+t.TextXAlignment=Enum.TextXAlignment.Center
+t.TextYAlignment=Enum.TextYAlignment.Center
+t.Visible=false
+t.ZIndex=30
+t.Parent=gui
+local g=Instance.new("UIStroke")
+g.ApplyStrokeMode=Enum.ApplyStrokeMode.Contextual
+g.Color=A.Color("Lavender")
+g.Thickness=1
+g.Transparency=1
+g.Enabled=false
+g.Parent=t
+return {text=t,glow=g}
+end
+local function updateText(o,cfg,value,color,x,y,w,h)
+if not cfg.enabled or not value or value=="" then
+o.text.Visible=false
+return
+end
+o.text.Text=tostring(value)
+o.text.TextColor3=color or A.Color("Lavender")
+o.text.TextStrokeColor3=A.Dark
+o.text.TextStrokeTransparency=cfg.outline and cfg.outlineTransparency or 1
+o.glow.Enabled=cfg.glow
+o.glow.Color=color or A.Color("Lavender")
+o.glow.Transparency=cfg.glowTransparency
+Pos(o.text,x,y,w,h)
+o.text.Visible=true
+end
+local function newBar()
+local outer=frame(gui,Color3.fromRGB(15,15,20),15)
+local mask=frame(outer,Color3.new(1,1,1),17)
+mask.BackgroundTransparency=1
+mask.ClipsDescendants=true
+local fill=frame(mask,Color3.new(1,1,1),18)
+fill.Visible=true
+local grad=Instance.new("UIGradient")
+grad.Rotation=90
+grad.Color=ColorSequence.new({
+ColorSequenceKeypoint.new(0,Color3.fromRGB(45,255,105)),
+ColorSequenceKeypoint.new(.5,Color3.fromRGB(255,235,65)),
+ColorSequenceKeypoint.new(1,Color3.fromRGB(255,55,75))
+})
+grad.Parent=fill
+local outline=A.Stroke(outer,A.Dark,1)
+local glow=A.Stroke(outer,A.Color("Lavender"),3)
+local text=newText()
+return {outer=outer,mask=mask,fill=fill,outline=outline,glow=glow,text=text,smooth=nil}
+end
+local function drawBar(b,x,y,w,h,hp,max,dt)
+local cfg=A.HC
+if not cfg.enabled then
+b.outer.Visible=false
+b.text.text.Visible=false
+return
+end
+local scale=math.clamp(h/110,.35,2)
+local bw=math.max(2,math.floor(cfg.width*scale+.5))
+local gap=math.max(3,math.floor(cfg.gap*scale+.5))
+local bx=x-gap-bw
+Pos(b.outer,bx,y,bw,h)
+b.outer.Visible=true
+b.outline.Enabled=cfg.outline
+b.outline.Transparency=cfg.outlineTransparency
+b.glow.Enabled=cfg.glow
+b.glow.Transparency=cfg.glowTransparency
+local ratio=math.clamp(hp/math.max(max,1),0,1)
+b.smooth=b.smooth and b.smooth+(ratio-b.smooth)*math.clamp(dt*cfg.speed,0,1) or ratio
+local fh=math.floor(h*b.smooth+.5)
+Pos(b.mask,0,0,bw,fh)
+b.mask.Visible=fh>0
+Pos(b.fill,0,0,bw,h)
+updateText(b.text,{enabled=cfg.number,glow=false,outline=false},math.floor(hp+.5),A.Color("Lavender"),bx-49,y+math.floor(h*.5)-4,43,18)
+end
+local bones={
+{"Head","UpperTorso"},{"UpperTorso","LowerTorso"},
+{"UpperTorso","LeftUpperArm"},{"LeftUpperArm","LeftLowerArm"},{"LeftLowerArm","LeftHand"},
+{"UpperTorso","RightUpperArm"},{"RightUpperArm","RightLowerArm"},{"RightLowerArm","RightHand"},
+{"LowerTorso","LeftUpperLeg"},{"LeftUpperLeg","LeftLowerLeg"},{"LeftLowerLeg","LeftFoot"},
+{"LowerTorso","RightUpperLeg"},{"RightUpperLeg","RightLowerLeg"},{"RightLowerLeg","RightFoot"}
+}
+local r6={
+{"Head","Torso"},{"Torso","Left Arm"},{"Torso","Right Arm"},
+{"Torso","Left Leg"},{"Torso","Right Leg"}
+}
+local function newLines(n)
+local arr={}
+for i=1,n do
+arr[i]={main=segment(gui),glow=segment(gui),outline=segment(gui)}
+end
+return arr
+end
+local function hideLines(arr)
+for _,v in ipairs(arr)do
+v.main.Visible=false
+v.glow.Visible=false
+v.outline.Visible=false
+end
+end
+local function drawLines(arr,cfg,points,color,width)
+hideLines(arr)
+if not cfg.enabled then return end
+for i,p in ipairs(points)do
+local o=arr[i]
+if o then
+o.main.BackgroundColor3=color
+Line(o.main,p[1],p[2],p[3],p[4],width)
+o.glow.Visible=cfg.glow
+if cfg.glow then
+o.glow.BackgroundColor3=color
+o.glow.BackgroundTransparency=cfg.glowTransparency
+Line(o.glow,p[1],p[2],p[3],p[4],width+3)
+end
+o.outline.Visible=cfg.outline
+if cfg.outline then
+o.outline.BackgroundColor3=A.Dark
+o.outline.BackgroundTransparency=cfg.outlineTransparency
+Line(o.outline,p[1],p[2],p[3],p[4],width+2)
+end
+end
+end
+end
+local function skeleton(c,cam)
+local pairsList=c:FindFirstChild("UpperTorso") and bones or r6
+local result={}
+for _,pair in ipairs(pairsList)do
+local a=c:FindFirstChild(pair[1])
+local b=c:FindFirstChild(pair[2])
+if a and b and a:IsA("BasePart") and b:IsA("BasePart") then
+local x=cam:WorldToViewportPoint(a.Position)
+local y=cam:WorldToViewportPoint(b.Position)
+if x.Z>0 and y.Z>0 then
+result[#result+1]={x.X,x.Y,y.X,y.Y}
+end
+end
+end
+return result
+end
+local weaponCache={}
+local function weaponName(c)
+local pl=P:GetPlayerFromCharacter(c) or P:FindFirstChild(c.Name)
+if not pl then return nil end
+local raw=pl:GetAttribute("CurrentEquipped")
+if type(raw)~="string" then return nil end
+local old=weaponCache[pl]
+if old and old.raw==raw then return old.name end
+local ok,data=pcall(A.Http.JSONDecode,A.Http,raw)
+local name=ok and type(data)=="table" and data.Name or nil
+weaponCache[pl]={raw=raw,name=name}
+return name
+end
+local function newTarget()
+return {
+box=newBox(),
+bar=newBar(),
+skeleton=newLines(14),
+tracer=newLines(1),
+name=newText(),
+distance=newText(),
+weapon=newText()
+}
+end
+local function hideTarget(o)
+hideBox(o.box)
+o.bar.outer.Visible=false
+o.bar.text.text.Visible=false
+hideLines(o.skeleton)
+hideLines(o.tracer)
+o.name.text.Visible=false
+o.distance.text.Visible=false
+o.weapon.text.Visible=false
+end
+local function destroyTarget(o)
+hideTarget(o)
+o.box.holder:Destroy()
+o.bar.outer:Destroy()
+o.bar.text.text:Destroy()
+for _,arr in ipairs({o.skeleton,o.tracer})do
+for _,v in ipairs(arr)do
+v.main:Destroy()
+v.glow:Destroy()
+v.outline:Destroy()
+end
+end
+o.name.text:Destroy()
+o.distance.text:Destroy()
+o.weapon.text:Destroy()
+end
+local function renderTarget(c,o,cam,dt)
+if not A.Valid(c) then hideTarget(o)return end
+local top,bottom=A.Bounds(c)
+local x,y,w,h=A.Project(cam,top,bottom)
+if not x then hideTarget(o)return end
+if A.C.enabled then
+drawBox(o.box,x,y,w,h,A.C)
+else
+hideBox(o.box)
+end
+local hp,max=A.Health(c)
+drawBar(o.bar,x,y,w,h,hp,max,dt)
+local sp=A.SK
+if sp.enabled then
+drawLines(o.skeleton,sp,skeleton(c,cam),A.Color(sp.color),sp.thickness)
+else
+hideLines(o.skeleton)
+end
+if A.TC.enabled then
+local size=cam.ViewportSize
+drawLines(o.tracer,A.TC,{{size.X*.5,size.Y,x+w*.5,y+h}},A.Color(A.TC.color),1)
+else
+hideLines(o.tracer)
+end
+local pl=P:GetPlayerFromCharacter(c) or P:FindFirstChild(c.Name)
+local name=pl and (pl.DisplayName or pl.Name) or c.Name
+updateText(o.name,A.NC,name,A.Color("Lavender"),x+w*.5-85,y-23,170,19)
+local root=A.Root(c)
+local distance=root and math.floor((cam.CFrame.Position-root.Position).Magnitude*.28+.5)
+updateText(o.distance,A.DC,distance and tostring(distance).."m",A.Color("Lavender"),x+w*.5-65,y+h+5,130,18)
+updateText(o.weapon,A.WC,weaponName(c),A.Color(A.WC.color),x+w*.5-85,y+h+(A.DC.enabled and 24 or 5),170,19)
+end
+local active=true
+local accumulator=0
+local connection
+connection=R.RenderStepped:Connect(function(dt)
+if not active or not A.Active then return end
+accumulator=accumulator+dt
+if accumulator<1/45 then return end
+dt=accumulator
+accumulator=0
+local cam=workspace.CurrentCamera
+if not cam then return end
+local current=A.Collect()
+for c,o in pairs(objects)do
+if not current[c] or not A.Valid(c) then
+destroyTarget(o)
+objects[c]=nil
+end
+end
+local any=A.C.enabled or A.HC.enabled or A.SK.enabled or A.TC.enabled or A.NC.enabled or A.DC.enabled or A.WC.enabled
+if not any then
+for _,o in pairs(objects)do hideTarget(o)end
+return
+end
+for c in pairs(current)do
+if A.Valid(c)then
+local o=objects[c]
+if not o then
+o=newTarget()
+objects[c]=o
+end
+local ok,err=pcall(renderTarget,c,o,cam,dt)
+if not ok then
+hideTarget(o)
+if not o.lastError or os.clock()-o.lastError>5 then
+warn("[AURORA ESP]",err)
+o.lastError=os.clock()
+end
+end
+end
+end
+end)
+A.StopRenderer=function()
+active=false
+if connection then connection:Disconnect()end
+for c,o in pairs(objects)do
+pcall(destroyTarget,o)
+objects[c]=nil
+end
+end
+print("[AURORA HUB V5.5] 2 часть загружена")
+local A=assert(getgenv().AuroraHubV55,"Сначала запусти часть 1")
+local T=A.Tabs.visuals
+local colors={"Ice Amethyst","Lavender","Ice Blue","White","Pink","Mint"}
+local materials={"ForceField","Glass","SmoothPlastic","Neon","Metal","Ice"}
+local function register(name,obj)
+A.Registry[name]=obj
+return obj
+end
+local function section(title)
+pcall(function()T:Section({Title=title})end)
+end
+local function toggle(title,cfg,key)
+return register(title,T:Toggle({
+Title=title,
+Value=cfg[key],
+Callback=function(v)cfg[key]=v end
+}))
+end
+local function slider(title,cfg,key,min,max,step)
+return register(title,T:Slider({
+Title=title,
+Value={Min=min,Max=max,Default=cfg[key]},
+Step=step,
+Callback=function(v)
+if type(v)=="number" then cfg[key]=v end
+end
+}))
+end
+local function dropdown(title,cfg,key,values)
+return register(title,T:Dropdown({
+Title=title,
+Values=values,
+Value=cfg[key],
+Multi=false,
+AllowNone=false,
+Callback=function(v)
+if type(v)=="table" then v=v[1]end
+if type(v)=="string" then cfg[key]=v end
+end
+}))
+end
+section("PLAYER ESP")
+toggle("Player ESP",A.C,"enabled")
+dropdown("Box mode",A.C,"mode",{"corners","full"})
+toggle("Box Glow",A.C,"glow")
+slider("Box Glow Transparency",A.C,"glowTransparency",0,1,.05)
+toggle("Box Filled",A.C,"filled")
+slider("Box Filled Transparency",A.C,"filledTransparency",0,1,.05)
+toggle("Box Outline",A.C,"outline")
+slider("Box Outline Transparency",A.C,"outlineTransparency",0,1,.05)
+section("HEALTH BAR ESP")
+toggle("Health Bar ESP",A.HC,"enabled")
+toggle("Health Number",A.HC,"number")
+toggle("Health Glow",A.HC,"glow")
+slider("Health Glow Transparency",A.HC,"glowTransparency",0,1,.05)
+toggle("Health Outline",A.HC,"outline")
+slider("Health Outline Transparency",A.HC,"outlineTransparency",0,1,.05)
+slider("Health Bar Width",A.HC,"width",2,9,1)
+slider("Health Bar Gap",A.HC,"gap",3,15,1)
+section("SKELETON ESP")
+toggle("Skeleton ESP",A.SK,"enabled")
+dropdown("Skeleton Color",A.SK,"color",colors)
+slider("Skeleton Thickness",A.SK,"thickness",1,5,.5)
+toggle("Skeleton Glow",A.SK,"glow")
+slider("Skeleton Glow Transparency",A.SK,"glowTransparency",0,1,.05)
+toggle("Skeleton Outline",A.SK,"outline")
+slider("Skeleton Outline Transparency",A.SK,"outlineTransparency",0,1,.05)
+section("TRACERS ESP")
+toggle("Tracers ESP",A.TC,"enabled")
+dropdown("Tracers Color",A.TC,"color",colors)
+toggle("Tracers Glow",A.TC,"glow")
+slider("Tracers Glow Transparency",A.TC,"glowTransparency",0,1,.05)
+toggle("Tracers Outline",A.TC,"outline")
+slider("Tracers Outline Transparency",A.TC,"outlineTransparency",0,1,.05)
+section("NAME ESP")
+toggle("Name ESP",A.NC,"enabled")
+toggle("Name Glow",A.NC,"glow")
+slider("Name Glow Transparency",A.NC,"glowTransparency",0,1,.05)
+toggle("Name Outline",A.NC,"outline")
+slider("Name Outline Transparency",A.NC,"outlineTransparency",0,1,.05)
+section("DISTANCE ESP")
+toggle("Distance ESP",A.DC,"enabled")
+toggle("Distance Glow",A.DC,"glow")
+slider("Distance Glow Transparency",A.DC,"glowTransparency",0,1,.05)
+toggle("Distance Outline",A.DC,"outline")
+slider("Distance Outline Transparency",A.DC,"outlineTransparency",0,1,.05)
+section("WEAPON ESP")
+toggle("Weapon ESP",A.WC,"enabled")
+dropdown("Weapon Color",A.WC,"color",colors)
+toggle("Weapon Glow",A.WC,"glow")
+slider("Weapon Glow Transparency",A.WC,"glowTransparency",0,1,.05)
+toggle("Weapon Outline",A.WC,"outline")
+slider("Weapon Outline Transparency",A.WC,"outlineTransparency",0,1,.05)
+section("SOUND ESP")
+toggle("Sound ESP",A.SC,"enabled")
+toggle("Sound Team Check",A.SC,"teamCheck")
+slider("Sound Distance (m)",A.SC,"distance",10,60,1)
+slider("Sound Lifetime",A.SC,"life",1,6,.5)
+slider("Sound Merge Range",A.SC,"merge",5,60,1)
+section("HAND CHAMS")
+toggle("Hand Chams",A.HandC,"enabled")
+dropdown("Hand Material",A.HandC,"material",materials)
+dropdown("Hand Color",A.HandC,"color",colors)
+slider("Hand Transparency",A.HandC,"transparency",0,1,.05)
+section("WEAPON CHAMS")
+toggle("Weapon Chams",A.GunC,"enabled")
+dropdown("Weapon Material",A.GunC,"material",materials)
+dropdown("Weapon Chams Color",A.GunC,"color",colors)
+slider("Weapon Chams Transparency",A.GunC,"transparency",0,1,.05)
+section("AURORA MANAGEMENT")
+register("Unload Aurora",T:Button({
+Title="Unload Aurora",
+Callback=function()A.Stop()end
+}))
+local S=A.Tabs.search
+pcall(function()S:Section({Title="Search Settings"})end)
+local query=""
+local result=""
+S:Input({
+Title="Search",
+Placeholder="ESP, Glow, Chams...",
+Callback=function(v)
+query=tostring(v or ""):lower()
+local found={}
+for name in pairs(A.Registry)do
+if query~="" and name:lower():find(query,1,true)then
+found[#found+1]=name
+end
+end
+table.sort(found)
+result=table.concat(found,"\n")
+end
+})
+S:Button({
+Title="Copy Search Results",
+Callback=function()
+if setclipboard then pcall(setclipboard,result)end
+end
+})
+print("[AURORA HUB V5.5] 3 часть загружена")
+local A=assert(getgenv().AuroraHubV55,"Сначала запусти часть 1")
+assert(A.NewBox and A.DrawBox,"Сначала запусти часть 2")
+local R=A.RunService
+local P=A.Players
+local LP=A.LocalPlayer
+local Rep=game:GetService("ReplicatedStorage")
+local H=A.Http
+local markers={}
+local received=0
+local accepted=0
+local connected=false
+local soundConnection
+local soundRender
+local soundActive=true
+local lastSound=0
+local recent={}
+local ignored={"Bomb","Plant","Defus","Killed","Music","Hostage","Round","Win"}
+local function count()
+local n=0
+for _ in pairs(markers)do n=n+1 end
+return n
+end
+local function decode(raw)
+if type(raw)~="string" then return nil end
+local ok,data=pcall(H.JSONDecode,H,raw)
+return ok and type(data)=="table" and data or nil
+end
+local function culled(pl)
+local folder=Rep:FindFirstChild("_PVS_CulledCharacters")
+return folder and folder:FindFirstChild(pl.Name)
+end
+local function whoFired(cls)
+if type(cls)~="string" then return nil end
+local result=nil
+local total=0
+for _,pl in ipairs(P:GetPlayers())do
+if pl~=LP then
+local c=pl.Character or culled(pl)
+local mine=A.Team(LP.Character) or A.Team(LP)
+local theirs=A.Team(pl) or A.Team(c)
+local ally=mine and theirs and mine==theirs
+if not ally and not (c and c:GetAttribute("Dead")==true) then
+local data=decode(pl:GetAttribute("CurrentEquipped"))
+if data and data.Name==cls then
+total=total+1
+result=pl
+end
+end
+end
+end
+return total==1 and result or nil
+end
+local function nearCharacter(pos)
+local folder=workspace:FindFirstChild("Characters")
+if not folder then return false end
+for _,c in ipairs(folder:GetChildren())do
+if c:IsA("Model")then
+local r=A.Root(c)
+if r and (r.Position-pos).Magnitude< A.SC.playerRange then
+return true
+end
+end
+end
+return false
+end
+local function ownPosition()
+local r=A.Root(LP.Character)
+if r then return r.Position end
+local cam=workspace.CurrentCamera
+return cam and cam.CFrame.Position
+end
+local function hideMarker(m)
+if m.box then m.box.holder.Visible=false end
+end
+local function removeMarker(i)
+local m=markers[i]
+if m then
+if m.box then pcall(function()m.box.holder:Destroy()end)end
+markers[i]=nil
+end
+end
+local function addMarker(pos,cls)
+local now=os.clock()
+for _,m in pairs(markers)do
+if (m.pos-pos).Magnitude<=A.SC.merge then
+local delta=now-m.updated
+if delta>=.05 and delta<=.5 then
+local velocity=(pos-m.pos)/delta
+if velocity.Magnitude<32 then m.velocity=velocity end
+end
+m.pos=pos
+m.updated=now
+m.created=now
+return
+end
+end
+if count()>=64 then
+local oldest
+local stamp=math.huge
+for i,m in pairs(markers)do
+if m.created<stamp then
+stamp=m.created
+oldest=i
+end
+end
+if oldest then removeMarker(oldest)end
+end
+local id=now+math.random()
+markers[id]={pos=pos,created=now,updated=now,velocity=Vector3.zero,cls=cls,box=nil}
+accepted=accepted+1
+end
+local function onSound(sound)
+received=received+1
+if not soundActive or not A.SC.enabled then return end
+if type(sound)~="table" then return end
+local pos=sound.Position
+if typeof(pos)~="Vector3" then return end
+local cls=tostring(sound.Class or "")
+local name=tostring(sound.Name or "")
+for _,v in ipairs(ignored)do
+if cls:lower():find(v:lower(),1,true) or name:lower():find(v:lower(),1,true)then return end
+end
+local now=os.clock()
+if now-lastSound<1/120 then return end
+lastSound=now
+local origin=ownPosition()
+if not origin then return end
+local distance=(pos-origin).Magnitude
+if distance<A.SC.selfRange or distance>A.SC.distance/.28 then return end
+if nearCharacter(pos)then return end
+local shooter=whoFired(cls)
+if A.SC.teamCheck and shooter then
+local mine=A.Team(LP.Character) or A.Team(LP)
+local theirs=A.Team(shooter.Character) or A.Team(shooter)
+if mine and theirs and mine==theirs then return end
+end
+addMarker(pos,cls)
+end
+local function connectSound()
+local ok,err=pcall(function()
+local database=Rep:WaitForChild("Database",15)
+assert(database,"Database missing")
+local security=database:WaitForChild("Security",15)
+assert(security,"Security missing")
+local module=security:WaitForChild("Remotes",15)
+assert(module,"Remotes missing")
+local remotes=require(module)
+assert(remotes.Sound and remotes.Sound.ReplicateSound,"Sound remote missing")
+soundConnection=remotes.Sound.ReplicateSound.Connect(function(sound)
+local success,message=pcall(onSound,sound)
+if not success then warn("[AURORA SOUND]",message)end
+end)
+connected=true
+end)
+if not ok then warn("[AURORA SOUND CONNECTION]",err)end
+end
+task.spawn(connectSound)
+local soundCfg={mode="corners",filled=false,glow=true,glowTransparency=.85,outline=true,outlineTransparency=.65}
+soundRender=R.RenderStepped:Connect(function()
+if not soundActive or not A.Active then return end
+local now=os.clock()
+local cam=workspace.CurrentCamera
+for i,m in pairs(markers)do
+local age=now-m.created
+if age>A.SC.life then
+removeMarker(i)
+elseif not A.SC.enabled or not cam then
+hideMarker(m)
+else
+local ok,err=pcall(function()
+local prediction=math.clamp(now-m.updated,0,.4)
+local pos=m.pos+m.velocity*prediction
+local x,y,w,h=A.Project(cam,pos+Vector3.new(0,5.5,0),pos)
+if x then
+if not m.box then m.box=A.NewBox()end
+A.DrawBox(m.box,x,y,w,h,soundCfg,math.clamp(age/A.SC.life*.8,0,.8))
+else
+hideMarker(m)
+end
+end)
+if not ok then
+hideMarker(m)
+if not m.errorTime or now-m.errorTime>5 then
+warn("[AURORA SOUND RENDER]",err)
+m.errorTime=now
+end
+end
+end
+end
+end)
+A.SoundStats=function()
+return {
+Connected=connected,
+Received=received,
+Accepted=accepted,
+Markers=count(),
+Enabled=A.SC.enabled
+}
+end
+A.StopSound=function()
+soundActive=false
+if soundRender then soundRender:Disconnect()end
+if soundConnection then
+pcall(function()soundConnection:Disconnect()end)
+end
+for i in pairs(markers)do removeMarker(i)end
+end
+local materials={
+ForceField=Enum.Material.ForceField,
+Glass=Enum.Material.Glass,
+SmoothPlastic=Enum.Material.SmoothPlastic,
+Neon=Enum.Material.Neon,
+Metal=Enum.Material.Metal,
+Ice=Enum.Material.Ice
+}
+local original={}
+local chamsActive=true
+local chamsConnection
+local skip={
+muzzlepart=true,
+hitbox=true,
+fakemag=true,
+viewmodellight=true,
+humanoidrootpart=true,
+camerapart=true
+}
+local handWords={
+leftarm=true,rightarm=true,
+leftupperarm=true,rightupperarm=true,
+leftlowerarm=true,rightlowerarm=true,
+lefthand=true,righthand=true,
+leftglove=true,rightglove=true,
+leftsleeve=true,rightsleeve=true
+}
+local function normalize(s)
+return tostring(s):lower():gsub("[%s_%-]","")
+end
+local function isHand(part)
+local name=normalize(part.Name)
+if handWords[name] then return true end
+if name:find("glove",1,true) or name:find("sleeve",1,true)then return true end
+local p=part.Parent
+while p and p~=workspace.CurrentCamera do
+local n=normalize(p.Name)
+if n:find("glove",1,true) or n=="arms" or n=="hands" or n:find("sleeve",1,true)then
+return true
+end
+p=p.Parent
+end
+return false
+end
+local function classify(part)
+if skip[normalize(part.Name)]then return nil end
+if part.Transparency>=.99 and not original[part]then return nil end
+return isHand(part) and "hand" or "gun"
+end
+local function save(part,kind)
+local old=original[part]
+if old then return old end
+old={
+material=part.Material,
+color=part.Color,
+transparency=part.Transparency,
+reflectance=part.Reflectance,
+kind=kind,
+hidden={}
+}
+if part:IsA("MeshPart")then
+old.textureID=part.TextureID
+end
+original[part]=old
+return old
+end
+local function hideTextures(part,old)
+for _,v in ipairs(part:GetChildren())do
+if v:IsA("SurfaceAppearance") or v:IsA("Decal") or v:IsA("Texture") then
+local exists=false
+for _,entry in ipairs(old.hidden)do
+if entry.object==v then exists=true break end
+end
+if not exists then
+old.hidden[#old.hidden+1]={object=v,parent=v.Parent}
+v.Parent=nil
+end
+end
+end
+if part:IsA("MeshPart")then
+pcall(function()part.TextureID=""end)
+end
+end
+local function restore(part)
+local old=original[part]
+if not old then return end
+if part and part.Parent then
+pcall(function()
+part.Material=old.material
+part.Color=old.color
+part.Transparency=old.transparency
+part.Reflectance=old.reflectance
+if old.textureID~=nil and part:IsA("MeshPart")then
+part.TextureID=old.textureID
+end
+end)
+end
+for _,entry in ipairs(old.hidden)do
+pcall(function()
+if entry.object then entry.object.Parent=entry.parent end
+end)
+end
+original[part]=nil
+end
+local function apply(part,cfg,kind)
+local old=save(part,kind)
+old.kind=kind
+hideTextures(part,old)
+pcall(function()
+part.Material=materials[cfg.material] or Enum.Material.ForceField
+part.Color=A.Color(cfg.color)
+part.Transparency=cfg.transparency
+part.Reflectance=0
+end)
+end
+local function renderChams()
+local camera=workspace.CurrentCamera
+local seen={}
+if camera and (A.HandC.enabled or A.GunC.enabled)then
+for _,model in ipairs(camera:GetChildren())do
+if model:IsA("Model")then
+for _,part in ipairs(model:GetDescendants())do
+if part:IsA("BasePart")then
+local kind=classify(part)
+local cfg=kind=="hand" and A.HandC or A.GunC
+if kind and cfg.enabled then
+seen[part]=true
+apply(part,cfg,kind)
+end
+end
+end
+end
+end
+end
+for part in pairs(original)do
+if not seen[part]then restore(part)end
+end
+end
+local elapsed=0
+chamsConnection=R.RenderStepped:Connect(function(dt)
+if not chamsActive or not A.Active then return end
+elapsed=elapsed+dt
+if elapsed<.05 then return end
+elapsed=0
+local ok,err=pcall(renderChams)
+if not ok then warn("[AURORA CHAMS]",err)end
+end)
+A.StopChams=function()
+chamsActive=false
+if chamsConnection then chamsConnection:Disconnect()end
+for part in pairs(original)do restore(part)end
+end
+print("[AURORA HUB V5.5] 4 часть загружена")
+print("[AURORA HUB V5.5] ALL PARTS LOADED")
