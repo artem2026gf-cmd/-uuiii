@@ -1,0 +1,607 @@
+-- ===================== NIGHTDLC SILENT AIM (Part 1/2) =====================
+
+local nightdlc_silentaim = {
+    enabled = false,
+    fov = 500,
+    teamcheck = true,
+    hitpart = "Head",
+    max_distance = 5000,
+    wallbang = false,
+    wallcheck = false,
+    target = nil,
+    raycast_module = nil,
+}
+
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local Workspace = game:GetService("Workspace")
+local RunService = game:GetService("RunService")
+local camera = Workspace.CurrentCamera
+
+local function ResolveAim(char, H)
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local head = char:FindFirstChild("Head")
+    local torso = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+    local mode = H.resolver_mode or "Body"
+
+    if H.resolver and mode == "Body" and root then
+        return head or root, root.Position + Vector3.new(0, 1.45, 0)
+    end
+
+    if H.resolver and (mode == "Multi" or H.multipoint) and camera then
+        local pts = {}
+        if root then
+            table.insert(pts, { part = root, pos = root.Position + Vector3.new(0, 1.45, 0) })
+            table.insert(pts, { part = root, pos = root.Position + Vector3.new(0, 0.9, 0) })
+            table.insert(pts, { part = root, pos = root.Position })
+            if H.backward then
+                local back = -root.CFrame.LookVector
+                table.insert(pts, { part = root, pos = root.Position + Vector3.new(0, 1.3, 0) + back * 0.35 })
+            end
+        end
+        if head then table.insert(pts, { part = head, pos = head.Position }) end
+        if torso then table.insert(pts, { part = torso, pos = torso.Position }) end
+        local center = camera.ViewportSize / 2
+        local best, bestD
+        for _, p in ipairs(pts) do
+            local sp, on = camera:WorldToViewportPoint(p.pos)
+            if on then
+                local d = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+                if not bestD or d < bestD then bestD = d; best = p end
+            end
+        end
+        if best then return best.part, best.pos end
+    end
+
+    if head then return head, head.Position end
+    if torso then return torso, torso.Position end
+    if root then return root, root.Position + Vector3.new(0, 1.2, 0) end
+    return nil, nil
+end
+
+local function GetClosestPlayer()
+    if not camera then return nil end
+    local H = getgenv().NIGHTDLC_HVH_COMBAT or {}
+    local fov = nightdlc_silentaim.fov
+    if H.rage_fov then fov = math.max(fov, 550) end
+    if H.force_shot then fov = math.max(fov, 8000) end
+
+    local bestScore, closest, bestAimPos = nil, nil, nil
+    local myTeam = LocalPlayer:GetAttribute("Team")
+    local lchar = LocalPlayer.Character
+    if not lchar then return nil end
+    local lhrp = lchar:FindFirstChild("Head") or lchar:FindFirstChild("HumanoidRootPart")
+    if not lhrp then return nil end
+    local now = tick()
+    local center = camera.ViewportSize / 2
+
+    local function apply_pred(pos, part)
+        if H.prediction and part then
+            local vel = part.AssemblyLinearVelocity
+            if vel.Magnitude > 1 then
+                local off = vel * (H.pred_scale or 0.12)
+                getgenv()._NIGHTDLC_PRED_OFFSET = off
+                return pos + off
+            end
+        end
+        getgenv()._NIGHTDLC_PRED_OFFSET = nil
+        return pos
+    end
+
+    if H.sticky and H._sticky_target and now < (H._sticky_until or 0) then
+        local st = H._sticky_target
+        if st and st.Parent then
+            local char = st.Parent
+            if char:IsA("BasePart") then char = char.Parent end
+            if char and char:IsA("Model") and not char:GetAttribute("Dead") then
+                local hum = char:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 then
+                    local part, aimPos = ResolveAim(char, H)
+                    if part and aimPos then
+                        aimPos = apply_pred(aimPos, part)
+                        getgenv()._NIGHTDLC_AIM_POS = aimPos
+                        return part
+                    end
+                end
+            end
+        end
+        H._sticky_target = nil
+    end
+
+    local function consider_char(char, teamAttr)
+        if not char or not char:IsA("Model") then return end
+        if char == lchar then return end
+        if char:GetAttribute("Dead") then return end
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if not hum or hum.Health <= 0 then return end
+        if not (char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")) then return end
+        if nightdlc_silentaim.teamcheck and teamAttr \~= nil and myTeam \~= nil and teamAttr == myTeam then return end
+
+        local part, aimPos = ResolveAim(char, H)
+        if not part or not aimPos then return end
+        local distance3d = (aimPos - lhrp.Position).Magnitude
+        if distance3d > nightdlc_silentaim.max_distance then return end
+        local screenPos, onScreen = camera:WorldToViewportPoint(aimPos)
+        if not onScreen and not H.force_shot then return end
+        local crossDist = onScreen and (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude or 9999
+        if crossDist > fov and not H.force_shot then return end
+        local visible = true
+        if nightdlc_silentaim.wallcheck and not nightdlc_silentaim.wallbang and not H.auto_wallbang and not H.force_shot then
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = {lchar}
+            local result = Workspace:Raycast(camera.CFrame.Position, aimPos - camera.CFrame.Position, params)
+            visible = (not result) or result.Instance:IsDescendantOf(char)
+        end
+        if not visible then return end
+        local score
+        local prio = H.priority or "Crosshair"
+        if prio == "Health" then score = hum.Health
+        elseif prio == "Distance" then score = distance3d
+        else score = crossDist end
+        if bestScore == nil or score < bestScore then
+            bestScore = score
+            closest = part
+            bestAimPos = aimPos
+        end
+    end
+
+    for _, v in Players:GetPlayers() do
+        if v == LocalPlayer then continue end
+        local skipFriend = false
+        pcall(function()
+            if H.ignore_friends and v:IsFriendsWith(LocalPlayer.UserId) then skipFriend = true end
+        end)
+        if skipFriend then continue end
+        local teamAttr = v:GetAttribute("Team")
+        if teamAttr == nil and v.Team then teamAttr = v.Team end
+        consider_char(v.Character, teamAttr)
+    end
+
+    local function scan_bots(root)
+        if not root then return end
+        for _, model in ipairs(root:GetChildren()) do
+            if model:IsA("Model") then
+                local hum = model:FindFirstChildOfClass("Humanoid")
+                if hum and hum.Health > 0 and not Players:GetPlayerFromCharacter(model) then
+                    local teamAttr = model:GetAttribute("Team")
+                    consider_char(model, teamAttr)
+                elseif model:IsA("Folder") or model:IsA("Model") then
+                    for _, child in ipairs(model:GetChildren()) do
+                        if child:IsA("Model") then
+                            local h2 = child:FindFirstChildOfClass("Humanoid")
+                            if h2 and h2.Health > 0 and not Players:GetPlayerFromCharacter(child) then
+                                consider_char(child, child:GetAttribute("Team"))
+                            end
+                        end
+                    end
+                end
+            elseif model:IsA("Folder") then
+                for _, child in ipairs(model:GetChildren()) do
+                    if child:IsA("Model") then
+                        local h2 = child:FindFirstChildOfClass("Humanoid")
+                        if h2 and h2.Health > 0 and not Players:GetPlayerFromCharacter(child) then
+                            consider_char(child, child:GetAttribute("Team"))
+                        end
+                    end
+                end
+            end
+        end
+    end
+    pcall(scan_bots, Workspace)
+
+    if closest and bestAimPos then
+        bestAimPos = apply_pred(bestAimPos, closest)
+        getgenv()._NIGHTDLC_AIM_POS = bestAimPos
+        if H.sticky then
+            H._sticky_target = closest
+            H._sticky_until = now + (H.sticky_time or 0.35)
+        end
+    else
+        getgenv()._NIGHTDLC_AIM_POS = nil
+    end
+    return closest
+end
+
+_G._silentAimData = {
+    target = nil,
+    localPlayer = LocalPlayer,
+    camera = camera,
+    oldCast = nil,
+    oldCastThrough = nil,
+}
+
+RunService.RenderStepped:Connect(function()
+    if nightdlc_silentaim.enabled then
+        _G._silentAimData.target = GetClosestPlayer()
+        nightdlc_silentaim.target = _G._silentAimData.target
+    else
+        _G._silentAimData.target = nil
+        nightdlc_silentaim.target = nil
+    end
+end)
+
+local raycastMODULE
+pcall(function()
+    if type(getgc) == "function" then
+        for _, obj in getgc(true) do
+            if type(obj) == "table" and rawget(obj, "cast") and rawget(obj, "castThrough") then
+                if type(rawget(obj, "cast")) == "function" and type(rawget(obj, "castThrough")) == "function" then
+                    raycastMODULE = obj
+                    break
+                end
+            end
+        end
+    end
+end)
+
+if not raycastMODULE then
+    local success, result = pcall(function()
+        return require(game:GetService("ReplicatedStorage"):WaitForChild("Shared"):WaitForChild("Raycast"))
+    end)
+    if success and type(result) == "table" and type(result.cast) == "function" and type(result.castThrough) == "function" then
+        raycastMODULE = result
+    end
+end
+
+nightdlc_silentaim.raycast_module = raycastMODULE
+
+if not raycastMODULE then
+    warn("[nightdlc] no raycast module found, silent aim disabled")
+else
+    local origiENV = getfenv()
+    local newENV = {}
+    setmetatable(newENV, {
+        __index = function(_, key)
+            if key == "getgenv" or key == "hookfunction" or key == "hookfunc" or key == "replaceclosure" or key == "oth" or key == "debug" then
+                return nil
+            end
+            return origiENV[key]
+        end
+    })
+
+    newENV._silentAimData = _G._silentAimData
+    newENV.typeof = typeof
+    newENV.Vector3 = Vector3
+    newENV.warn = warn
+    newENV.select = select
+    newENV.nightdlc_silentaim = nightdlc_silentaim
+
+    local cast = loadstring([[
+        return function(origin, direction, ...)
+            local data = _silentAimData
+            local t = data.target
+            local config = nightdlc_silentaim
+            
+            if t and typeof(direction) == "Vector3" and config.enabled then
+                local lchar = data.localPlayer.Character
+                if lchar and lchar:FindFirstChild("Head") then
+                    local dist = (origin - lchar.Head.Position).Magnitude
+                    if dist < 50 then
+                        local g = getgenv and getgenv() or _G
+                        local aim = rawget(g, "_NIGHTDLC_AIM_POS")
+                        if typeof(aim) \~= "Vector3" then
+                            aim = t.Position
+                            local pred = rawget(g, "_NIGHTDLC_PRED_OFFSET")
+                            if typeof(pred) == "Vector3" then aim = aim + pred end
+                        end
+                        direction = (aim - origin)
+                    end
+                end
+            end
+            
+            if data.oldCast then
+                return data.oldCast(origin, direction, ...)
+            end
+            return nil
+        end
+    ]])
+
+    local castthrough = loadstring([[
+        return function(origin, direction, ...)
+            local data = _silentAimData
+            local t = data.target
+            local config = nightdlc_silentaim
+            
+            if t and typeof(direction) == "Vector3" and config.enabled then
+                local lchar = data.localPlayer.Character
+                if lchar and lchar:FindFirstChild("Head") then
+                    local dist = (origin - lchar.Head.Position).Magnitude
+                    if dist < 50 then
+                        local g = getgenv and getgenv() or _G
+                        local aim = rawget(g, "_NIGHTDLC_AIM_POS")
+                        if typeof(aim) \~= "Vector3" then
+                            aim = t.Position
+                            local pred = rawget(g, "_NIGHTDLC_PRED_OFFSET")
+                            if typeof(pred) == "Vector3" then aim = aim + pred end
+                        end
+                        direction = (aim - origin)
+                    end
+                end
+            end
+            
+            if data.oldCastThrough then
+                return data.oldCastThrough(origin, direction, ...)
+            end
+            return nil
+        end
+    ]])
+
+    pcall(function() setfenv(cast, newENV) end)
+    pcall(function() setfenv(castthrough, newENV) end)
+
+    _G._silentAimData.oldCast = raycastMODULE.cast
+    _G._silentAimData.oldCastThrough = raycastMODULE.castThrough
+
+    local castHook = cast()
+    local castThroughHook = castthrough()
+
+    if type(hookfunction) == "function" then
+        pcall(function()
+            _G._silentAimData.oldCast = hookfunction(raycastMODULE.cast, function(origin, direction, ...)
+                if not nightdlc_silentaim.enabled or not _G._silentAimData.oldCast then
+                    return _G._silentAimData.oldCast(origin, direction, ...)
+                end
+                return castHook(origin, direction, ...)
+            end)
+        end)
+
+        pcall(function()
+            _G._silentAimData.oldCastThrough = hookfunction(raycastMODULE.castThrough, function(origin, direction, ...)
+                if not nightdlc_silentaim.enabled or not _G._silentAimData.oldCastThrough then
+                    return _G._silentAimData.oldCastThrough(origin, direction, ...)
+                end
+                return castThroughHook(origin, direction, ...)
+            end)
+        end)
+        
+        print("[nightdlc] Silent Aim: Raycast module hooked successfully")
+    else
+        warn("[nightdlc] hookfunction is unavailable, silent aim may not work")
+    end
+end
+
+function nightdlc_silentaim:toggle(state)
+    if type(state) == "boolean" then
+        self.enabled = state
+    else
+        self.enabled = not self.enabled
+    end
+    getgenv().NIGHTDLC_SILENT_AIM_ENABLED = self.enabled
+    getgenv().NIGHTDLC_SILENT_AIM = self
+    print("[nightdlc] Silent Aim: " .. (self.enabled and "ON" or "OFF"))
+end
+
+function nightdlc_silentaim:set_fov(new_fov)
+    self.fov = new_fov
+end
+
+function nightdlc_silentaim:set_distance(new_distance)
+    self.max_distance = new_distance
+end
+
+function nightdlc_silentaim:set_teamcheck(enabled)
+    self.teamcheck = enabled
+end
+
+getgenv().NIGHTDLC_SILENT_AIM = nightdlc_silentaim
+getgenv().NIGHTDLC_SILENT_AIM_ENABLED = false
+_G.nightdlc_silentaim = nightdlc_silentaim
+
+print("[✓] Silent Aim loaded (Part 1/2)")
+          -- ===================== NIGHTDLC AUTOSHOOT (Part 2/2) =====================
+-- Requires Part 1 (Silent Aim) already executed
+
+local nightdlc_autoshoot = {
+	enabled = false,
+	fov = 250,
+	max_distance = 5000,
+	teamcheck = true,
+	target = nil,
+	last_fire_time = 0,
+	shot_cooldown = 0,
+	death_wait = 0,
+	pending = nil,
+	skip_until = {},
+	enemy_detected = false,
+	firing = false,
+}
+
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local Workspace = game:GetService("Workspace")
+
+function nightdlc_autoshoot:is_alive(player)
+	if not player then return false end
+	local char = player.Character
+	if not char then return false end
+	if type(player) \~= "table" or not player.IsBot then
+		if char:GetAttribute("Dead") then return false end
+	end
+	local hum = char:FindFirstChildOfClass("Humanoid")
+	return hum and hum.Health > 0
+end
+
+function nightdlc_autoshoot:player_from_part(part)
+	if not part then return nil end
+	local model = part:FindFirstAncestorOfClass("Model")
+	if not model then return nil end
+	return Players:GetPlayerFromCharacter(model)
+end
+
+function nightdlc_autoshoot:detect_enemy()
+	local sa_target = nil
+	pcall(function()
+		if _G._silentAimData and _G._silentAimData.target then
+			sa_target = _G._silentAimData.target
+		elseif getgenv().NIGHTDLC_SILENT_AIM and getgenv().NIGHTDLC_SILENT_AIM.target then
+			sa_target = getgenv().NIGHTDLC_SILENT_AIM.target
+		end
+	end)
+	if sa_target then
+		local plr = self:player_from_part(sa_target)
+		if plr and self:is_alive(plr) then
+			local now = tick()
+			if not (self.skip_until[plr] and now < self.skip_until[plr]) then
+				return plr
+			end
+		end
+	end
+
+	if not LocalPlayer.Character then return nil end
+	local camera = Workspace.CurrentCamera
+	if not camera then return nil end
+	local closest_dist = self.fov
+	local closest_enemy = nil
+	local local_head = LocalPlayer.Character:FindFirstChild("Head")
+	if not local_head then return nil end
+	local now = tick()
+	local myTeam = LocalPlayer.Team
+
+	for _, player in ipairs(Players:GetPlayers()) do
+		if player == LocalPlayer then continue end
+		if self.skip_until[player] and now < self.skip_until[player] then continue end
+		local char = player.Character
+		if not char or char:GetAttribute("Dead") then continue end
+		local humanoid = char:FindFirstChildOfClass("Humanoid")
+		if not humanoid or humanoid.Health <= 0 then continue end
+		if self.teamcheck and player.Team and myTeam and player.Team == myTeam then continue end
+
+		local aimPos
+		local head = char:FindFirstChild("Head")
+		local root = char:FindFirstChild("HumanoidRootPart")
+		if root then
+			aimPos = root.Position + Vector3.new(0, 1.45, 0)
+		elseif head then
+			aimPos = head.Position
+		else
+			continue
+		end
+
+		local distance_3d = (aimPos - local_head.Position).Magnitude
+		if distance_3d > self.max_distance then continue end
+		local screen_pos, on_screen = camera:WorldToViewportPoint(aimPos)
+		if not on_screen then continue end
+		local screen_center = camera.ViewportSize / 2
+		local screen_dist = (Vector2.new(screen_pos.X, screen_pos.Y) - screen_center).Magnitude
+		if screen_dist < closest_dist then
+			closest_dist = screen_dist
+			closest_enemy = player
+		end
+	end
+
+	pcall(function()
+		local camera = Workspace.CurrentCamera
+		if not camera then return end
+		local local_head = LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("Head")
+		if not local_head then return end
+		local center = camera.ViewportSize / 2
+		for _, model in ipairs(Workspace:GetChildren()) do
+			if model:IsA("Model") and model \~= LocalPlayer.Character then
+				local hum = model:FindFirstChildOfClass("Humanoid")
+				local head = model:FindFirstChild("Head")
+				local root = model:FindFirstChild("HumanoidRootPart")
+				if hum and hum.Health > 0 and (head or root) and not Players:GetPlayerFromCharacter(model) then
+					local aim = (head or root).Position
+					local d3 = (aim - local_head.Position).Magnitude
+					if d3 <= self.max_distance then
+						local sp, on = camera:WorldToViewportPoint(aim)
+						if on then
+							local sd = (Vector2.new(sp.X, sp.Y) - center).Magnitude
+							if sd < closest_dist then
+								closest_dist = sd
+								closest_enemy = { Name = model.Name, DisplayName = model.Name, Character = model, IsBot = true }
+							end
+						end
+					end
+				end
+			end
+		end
+	end)
+	return closest_enemy
+end
+
+function nightdlc_autoshoot:click()
+	if self.firing then return end
+	self.firing = true
+	pcall(function()
+		if mouse1click then
+			mouse1click()
+		elseif mouse1press and mouse1release then
+			mouse1press()
+			mouse1release()
+		else
+			local m = LocalPlayer:GetMouse()
+			m:TriggerButton1Down()
+			m:TriggerButton1Up()
+		end
+	end)
+	self.firing = false
+	self.last_fire_time = tick()
+end
+
+function nightdlc_autoshoot:fire_once_head(player)
+	if not self.enabled or not player then return false end
+	if not self:is_alive(player) then return false end
+	pcall(function()
+		if getgenv().NIGHTDLC_SILENT_AIM and getgenv().NIGHTDLC_SILENT_AIM.toggle then
+			getgenv().NIGHTDLC_SILENT_AIM:toggle(true)
+		end
+	end)
+	self:click()
+	return true
+end
+
+function nightdlc_autoshoot:toggle(state)
+	if type(state) == "boolean" then
+		self.enabled = state
+	else
+		self.enabled = not self.enabled
+	end
+	self.pending = nil
+	print("[nightdlc] Autoshoot: " .. (self.enabled and "ON" or "OFF"))
+end
+
+function nightdlc_autoshoot:set_fov(new_fov)
+	self.fov = tonumber(new_fov) or self.fov
+end
+
+function nightdlc_autoshoot:set_teamcheck(enabled)
+	self.teamcheck = enabled == true
+end
+
+spawn(function()
+	while true do
+		if nightdlc_autoshoot.enabled then
+			local as = nightdlc_autoshoot
+			if as.pending then
+				if as.death_wait and as.death_wait > 0 then task.wait(as.death_wait) end
+				local plr = as.pending
+				as.pending = nil
+				if as:is_alive(plr) then
+					as.skip_until[plr] = tick() + 0.15
+				else
+					as.skip_until[plr] = tick() + 1.0
+				end
+			else
+				local enemy = as:detect_enemy()
+				as.enemy_detected = enemy \~= nil
+				as.target = enemy
+				if enemy and (tick() - as.last_fire_time) >= as.shot_cooldown then
+					if as:fire_once_head(enemy) then
+						as.pending = enemy
+					end
+				end
+			end
+			task.wait(0)
+		else
+			task.wait(0.05)
+		end
+	end
+end)
+
+getgenv().NIGHTDLC_AUTOSHOOT = nightdlc_autoshoot
+_G.nightdlc_autoshoot = nightdlc_autoshoot
+
+print("[✓] Autoshoot loaded (Part 2/2)")
+print("Usage: nightdlc_silentaim:toggle()  |  nightdlc_autoshoot:toggle()")
