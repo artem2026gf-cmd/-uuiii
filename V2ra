@@ -1,0 +1,384 @@
+-- ===================== SHITARO SILENT AIM (Part 1/3) =====================
+-- Phone-safe, pcall protected
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+local SilentAim = {
+    enabled = false,
+    fov = 120,
+    maxDistance = 2000,
+    teamCheck = true,
+    prefer = "head",          -- head / torso
+    hitboxes = { head = true, torso = true },
+    wallCheck = false,
+    target = nil,
+    aimPos = nil,
+}
+
+getgenv().SHITARO_SILENT = SilentAim
+
+local function isAlive(char)
+    if not char then return false end
+    local hum = char:FindFirstChildOfClass("Humanoid")
+    return hum and hum.Health > 0 and not char:GetAttribute("Dead")
+end
+
+local function getTeam(player)
+    return player:GetAttribute("Team") or player.Team
+end
+
+local function resolvePart(char)
+    local head = char:FindFirstChild("Head")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    local torso = char:FindFirstChild("UpperTorso") or char:FindFirstChild("Torso")
+
+    if SilentAim.prefer == "head" and head then
+        return head, head.Position
+    end
+    if torso then
+        return torso, torso.Position
+    end
+    if root then
+        return root, root.Position + Vector3.new(0, 1.4, 0)
+    end
+    if head then
+        return head, head.Position
+    end
+    return nil, nil
+end
+
+local function getClosest()
+    if not Camera or not LocalPlayer.Character then return nil, nil end
+    local origin = Camera.CFrame.Position
+    local center = Camera.ViewportSize / 2
+    local bestDist, bestPart, bestPos = SilentAim.fov, nil, nil
+    local myTeam = getTeam(LocalPlayer)
+
+    for _, plr in ipairs(Players:GetPlayers()) do
+        if plr == LocalPlayer then continue end
+        if SilentAim.teamCheck and myTeam and getTeam(plr) == myTeam then continue end
+
+        local char = plr.Character
+        if not isAlive(char) then continue end
+
+        local part, pos = resolvePart(char)
+        if not part or not pos then continue end
+
+        local dist3d = (pos - origin).Magnitude
+        if dist3d > SilentAim.maxDistance then continue end
+
+        local screen, onScreen = Camera:WorldToViewportPoint(pos)
+        if not onScreen then continue end
+
+        local cross = (Vector2.new(screen.X, screen.Y) - center).Magnitude
+        if cross > SilentAim.fov then continue end
+
+        if SilentAim.wallCheck then
+            local params = RaycastParams.new()
+            params.FilterType = Enum.RaycastFilterType.Exclude
+            params.FilterDescendantsInstances = { LocalPlayer.Character }
+            local hit = Workspace:Raycast(origin, pos - origin, params)
+            if hit and not hit.Instance:IsDescendantOf(char) then
+                continue
+            end
+        end
+
+        if cross < bestDist then
+            bestDist = cross
+            bestPart = part
+            bestPos = pos
+        end
+    end
+
+    return bestPart, bestPos
+end
+
+RunService.RenderStepped:Connect(function()
+    if not SilentAim.enabled then
+        SilentAim.target = nil
+        SilentAim.aimPos = nil
+        return
+    end
+
+    local ok, part, pos = pcall(getClosest)
+    if ok then
+        SilentAim.target = part
+        SilentAim.aimPos = pos
+    else
+        SilentAim.target = nil
+        SilentAim.aimPos = nil
+    end
+end)
+
+function SilentAim:toggle(state)
+    if type(state) == "boolean" then
+        self.enabled = state
+    else
+        self.enabled = not self.enabled
+    end
+    print("[SHITARO] Silent Aim:", self.enabled and "ON" or "OFF")
+end
+
+function SilentAim:setFov(v)
+    self.fov = tonumber(v) or self.fov
+end
+
+function SilentAim:setPrefer(v)
+    if v == "head" or v == "torso" then
+        self.prefer = v
+    end
+end
+
+print("[✓] Silent Aim Core loaded (1/3)")
+-- ===================== SHITARO AUTOSHOOT + TRIGGERBOT (Part 2/3) =====================
+-- Requires Part 1 already executed
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+
+local AutoShoot = {
+    enabled = false,
+    mode = "trigger",          -- "trigger" | "autoshoot"
+    cooldown = 0.05,
+    lastShot = 0,
+    requireSilent = true,
+}
+
+local TriggerBot = {
+    enabled = false,
+    fov = 40,
+    delay = 0.02,
+    lastClick = 0,
+}
+
+getgenv().SHITARO_AUTOSHOOT = AutoShoot
+getgenv().SHITARO_TRIGGER = TriggerBot
+
+local function safeClick()
+    pcall(function()
+        if mouse1click then
+            mouse1click()
+        elseif mouse1press and mouse1release then
+            mouse1press()
+            task.wait(0.01)
+            mouse1release()
+        else
+            local m = LocalPlayer:GetMouse()
+            if m then
+                m:TriggerButton1Down()
+                task.wait(0.01)
+                m:TriggerButton1Up()
+            end
+        end
+    end)
+end
+
+local function isTargetValid()
+    local sa = getgenv().SHITARO_SILENT
+    if not sa or not sa.enabled then return false end
+    if not sa.target or not sa.aimPos then return false end
+    return true
+end
+
+-- Triggerbot loop
+RunService.RenderStepped:Connect(function()
+    if not TriggerBot.enabled then return end
+    if tick() - TriggerBot.lastClick < TriggerBot.delay then return end
+
+    local sa = getgenv().SHITARO_SILENT
+    if not sa or not sa.target then return end
+
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+
+    local screen, onScreen = cam:WorldToViewportPoint(sa.aimPos)
+    if not onScreen then return end
+
+    local center = cam.ViewportSize / 2
+    local dist = (Vector2.new(screen.X, screen.Y) - center).Magnitude
+    if dist > TriggerBot.fov then return end
+
+    safeClick()
+    TriggerBot.lastClick = tick()
+end)
+
+-- Autoshoot loop
+task.spawn(function()
+    while true do
+        if AutoShoot.enabled and isTargetValid() then
+            if tick() - AutoShoot.lastShot >= AutoShoot.cooldown then
+                safeClick()
+                AutoShoot.lastShot = tick()
+            end
+            task.wait(0)
+        else
+            task.wait(0.03)
+        end
+    end
+end)
+
+function AutoShoot:toggle(state)
+    if type(state) == "boolean" then
+        self.enabled = state
+    else
+        self.enabled = not self.enabled
+    end
+    print("[SHITARO] Autoshoot:", self.enabled and "ON" or "OFF")
+end
+
+function TriggerBot:toggle(state)
+    if type(state) == "boolean" then
+        self.enabled = state
+    else
+        self.enabled = not self.enabled
+    end
+    print("[SHITARO] Triggerbot:", self.enabled and "ON" or "OFF")
+end
+
+function TriggerBot:setFov(v)
+    self.fov = tonumber(v) or self.fov
+end
+
+print("[✓] Autoshoot + Triggerbot loaded (2/3)")
+-- ===================== SHITARO HOOKS + BINDINGS (Part 3/3) =====================
+-- Requires Part 1 + Part 2
+
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+
+-- Try to find raycast module (common in CS-style games)
+local raycastModule
+pcall(function()
+    if type(getgc) == "function" then
+        for _, obj in getgc(true) do
+            if type(obj) == "table" then
+                local cast = rawget(obj, "cast") or rawget(obj, "Cast")
+                local castThrough = rawget(obj, "castThrough") or rawget(obj, "CastThrough")
+                if type(cast) == "function" and type(castThrough) == "function" then
+                    raycastModule = obj
+                    break
+                end
+            end
+        end
+    end
+end)
+
+if not raycastModule then
+    pcall(function()
+        local shared = game:GetService("ReplicatedStorage"):FindFirstChild("Shared")
+        if shared then
+            local ray = shared:FindFirstChild("Raycast")
+            if ray then
+                local mod = require(ray)
+                if type(mod) == "table" and type(mod.cast) == "function" then
+                    raycastModule = mod
+                end
+            end
+        end
+    end)
+end
+
+if raycastModule and type(hookfunction) == "function" then
+    local oldCast = raycastModule.cast
+    local oldCastThrough = raycastModule.castThrough
+
+    local function redirect(origin, direction, ...)
+        local sa = getgenv().SHITARO_SILENT
+        if sa and sa.enabled and sa.aimPos and typeof(direction) == "Vector3" then
+            local lchar = LocalPlayer.Character
+            if lchar and lchar:FindFirstChild("Head") then
+                local dist = (origin - lchar.Head.Position).Magnitude
+                if dist < 60 then
+                    direction = (sa.aimPos - origin)
+                end
+            end
+        end
+        return direction
+    end
+
+    pcall(function()
+        raycastModule.cast = hookfunction(oldCast, function(origin, direction, ...)
+            direction = redirect(origin, direction)
+            return oldCast(origin, direction, ...)
+        end)
+    end)
+
+    pcall(function()
+        if oldCastThrough then
+            raycastModule.castThrough = hookfunction(oldCastThrough, function(origin, direction, ...)
+                direction = redirect(origin, direction)
+                return oldCastThrough(origin, direction, ...)
+            end)
+        end
+    end)
+
+    print("[SHITARO] Raycast hooked")
+else
+    warn("[SHITARO] Raycast module not found — silent aim visual only")
+end
+
+-- Simple keybinds (phone-friendly: use getgenv calls or UI)
+-- G = Silent Aim toggle
+-- J = Autoshoot toggle
+-- T = Triggerbot toggle
+
+local UserInputService = game:GetService("UserInputService")
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.G then
+        local sa = getgenv().SHITARO_SILENT
+        if sa then sa:toggle() end
+    elseif input.KeyCode == Enum.KeyCode.J then
+        local as = getgenv().SHITARO_AUTOSHOOT
+        if as then as:toggle() end
+    elseif input.KeyCode == Enum.KeyCode.T then
+        local tb = getgenv().SHITARO_TRIGGER
+        if tb then tb:toggle() end
+    end
+end)
+
+-- Mobile buttons (optional floating)
+pcall(function()
+    local gui = Instance.new("ScreenGui")
+    gui.Name = "ShitaroMobile"
+    gui.ResetOnSpawn = false
+    gui.Parent = game:GetService("CoreGui")
+
+    local function makeBtn(text, pos, callback)
+        local b = Instance.new("TextButton")
+        b.Size = UDim2.fromOffset(90, 36)
+        b.Position = pos
+        b.BackgroundColor3 = Color3.fromRGB(30, 30, 40)
+        b.TextColor3 = Color3.new(1, 1, 1)
+        b.Text = text
+        b.Font = Enum.Font.GothamBold
+        b.TextSize = 13
+        b.Parent = gui
+        Instance.new("UICorner", b).CornerRadius = UDim.new(0, 8)
+        b.MouseButton1Click:Connect(callback)
+        return b
+    end
+
+    makeBtn("Silent", UDim2.new(0, 12, 0.7, 0), function()
+        local sa = getgenv().SHITARO_SILENT
+        if sa then sa:toggle() end
+    end)
+    makeBtn("Auto", UDim2.new(0, 110, 0.7, 0), function()
+        local as = getgenv().SHITARO_AUTOSHOOT
+        if as then as:toggle() end
+    end)
+    makeBtn("Trigger", UDim2.new(0, 208, 0.7, 0), function()
+        local tb = getgenv().SHITARO_TRIGGER
+        if tb then tb:toggle() end
+    end)
+end)
+
+print("[✓] Hooks + Bindings loaded (3/3)")
+print("Keys: G = Silent | J = Autoshoot | T = Trigger")
+print("Mobile buttons appear bottom-left")
