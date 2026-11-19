@@ -1,0 +1,2027 @@
+-- The full menu, with a visible diagnostic if startup fails.
+local originalWarn = warn
+local function showStartupError(message)
+    originalWarn("[BlockStrike startup]", message)
+    pcall(function()
+        local players = game:GetService("Players")
+        local player = players.LocalPlayer
+        local parent = player and player:FindFirstChildOfClass("PlayerGui")
+        if not parent then return end
+        local old = parent:FindFirstChild("BlockStrikeStartupError")
+        if old then old:Destroy() end
+        local gui = Instance.new("ScreenGui")
+        gui.Name = "BlockStrikeStartupError"
+        gui.ResetOnSpawn = false
+        gui.DisplayOrder = 9999
+        gui.Parent = parent
+        local panel = Instance.new("Frame")
+        panel.Size = UDim2.new(0.9, 0, 0, 250)
+        panel.Position = UDim2.new(0.05, 0, 0.5, -125)
+        panel.BackgroundColor3 = Color3.fromRGB(32, 25, 30)
+        panel.Parent = gui
+        Instance.new("UICorner", panel)
+        local text = Instance.new("TextBox")
+        text.Size = UDim2.new(1, -20, 1, -60)
+        text.Position = UDim2.fromOffset(10, 10)
+        text.BackgroundTransparency = 1
+        text.TextColor3 = Color3.new(1, 1, 1)
+        text.Font = Enum.Font.Code
+        text.TextSize = 13
+        text.TextWrapped = true
+        text.TextXAlignment = Enum.TextXAlignment.Left
+        text.TextYAlignment = Enum.TextYAlignment.Top
+        text.MultiLine = true
+        text.ClearTextOnFocus = false
+        text.TextEditable = false
+        text.Text = "Ошибка запуска Block Strike:\n" .. tostring(message)
+        text.Parent = panel
+        local copy = Instance.new("TextButton")
+        copy.Size = UDim2.new(0.48, 0, 0, 38)
+        copy.Position = UDim2.new(0.02, 0, 1, -45)
+        copy.Text = "Копировать ошибку"
+        copy.TextColor3 = Color3.new(1, 1, 1)
+        copy.BackgroundColor3 = Color3.fromRGB(75, 75, 95)
+        copy.Parent = panel
+        copy.MouseButton1Click:Connect(function()
+            if type(setclipboard) == "function" then pcall(setclipboard, text.Text) end
+        end)
+        local close = Instance.new("TextButton")
+        close.Size = UDim2.new(0.46, 0, 0, 38)
+        close.Position = UDim2.new(0.52, 0, 1, -45)
+        close.Text = "Закрыть"
+        close.TextColor3 = Color3.new(1, 1, 1)
+        close.BackgroundColor3 = Color3.fromRGB(75, 75, 95)
+        close.Parent = panel
+        close.MouseButton1Click:Connect(function() gui:Destroy() end)
+    end)
+end
+local function warn(...)
+    originalWarn(...)
+    local first = tostring(select(1, ...))
+    if first:find("[Silent]", 1, true) or first:find("[Box ESP]", 1, true) then
+        local items = table.pack(...)
+        local out = {}
+        for i = 1, items.n do out[#out + 1] = tostring(items[i]) end
+        showStartupError(table.concat(out, " "))
+    end
+end
+local startupOk, startupError = xpcall(function()
+-- Block Strike: интерфейс + только Silent aim. Перед первым запуском перезайди.
+local Players = game:GetService("Players")
+local RS = game:GetService("ReplicatedStorage")
+local player = Players.LocalPlayer
+local FOV_RADIUS, TEAM_CHECK = 180, true
+local TARGET_NAMES = {"Head", "UpperTorso", "LowerTorso", "LeftUpperArm", "LeftLowerArm", "LeftHand", "RightUpperArm", "RightLowerArm", "RightHand", "LeftUpperLeg", "LeftLowerLeg", "LeftFoot", "RightUpperLeg", "RightLowerLeg", "RightFoot"}
+local SELECTED = {Head = true}
+local TARGET_PRIORITY = "Hit chance"
+-- Weapon data uses four broad groups. Limb mapping is inferred from names.
+local DAMAGE_GROUP = {
+    Head = "Head", UpperTorso = "Torso", LowerTorso = "Torso",
+    LeftUpperArm = "Arms", LeftLowerArm = "Arms", LeftHand = "Arms",
+    RightUpperArm = "Arms", RightLowerArm = "Arms", RightHand = "Arms",
+    LeftUpperLeg = "Legs", LeftLowerLeg = "Legs", LeftFoot = "Legs",
+    RightUpperLeg = "Legs", RightLowerLeg = "Legs", RightFoot = "Legs"
+}
+local WALL_CHECK, MAX_DISTANCE = false, 500
+local RunService = game:GetService("RunService")
+local common = RS:WaitForChild("Components"):WaitForChild("Common")
+local Participants = require(common:WaitForChild("Participants"))
+local GetRayIgnore = require(common:WaitForChild("GetRayIgnore"))
+local Raycast = require(RS:WaitForChild("Shared"):WaitForChild("Raycast"))
+local Bullet = require(RS:WaitForChild("Components"):WaitForChild("Weapon"):WaitForChild("Classes"):WaitForChild("Bullet"))
+local function ignoreList() return GetRayIgnore() end
+
+local function teamOf(participant)
+    local team = participant:GetAttribute("Team")
+    if type(team) == "string" and team ~= "" then return team end
+    if participant:IsA("Player") and participant.Team then
+        return participant.Team.Name
+    end
+    return nil
+end
+
+local function candidates(camera, origin, range, properties)
+    local center = camera.ViewportSize * 0.5
+    local myTeam = teamOf(player)
+    local result = {}
+    for _, participant in ipairs(Participants.GetAll()) do
+        if participant ~= player and Participants.IsAlive(participant) then
+            local targetTeam = teamOf(participant)
+            local enemy = not TEAM_CHECK or (myTeam ~= nil and targetTeam ~= nil and myTeam ~= targetTeam)
+            if enemy then
+                local character = Participants.Character(participant)
+                if character and character:IsDescendantOf(workspace)
+                    and character:GetAttribute("Dead") ~= true then
+                    for _, name in ipairs(TARGET_NAMES) do
+                        if SELECTED[name] then
+                            local part = character:FindFirstChild(name)
+                            if part and part:IsA("BasePart") then
+                                local offset = part.Position - origin
+                                local distanceWorld = offset.Magnitude
+                                if distanceWorld > 0.001 and distanceWorld <= range then
+                                    local point, visible = camera:WorldToViewportPoint(part.Position)
+                                    if visible and point.Z > 0 then
+                                        local distance = (Vector2.new(point.X, point.Y) - center).Magnitude
+                                        if distance <= FOV_RADIUS then
+                                            -- A coarse projected-size estimate; not a measured hit probability.
+                                            local size = part.Size
+                                            local score = (size.X * size.Y + size.Y * size.Z + size.X * size.Z) / (point.Z * point.Z)
+                                            local perPart = type(properties.DamagePerPart) == "table" and properties.DamagePerPart or nil
+                                            local damage = perPart and tonumber(perPart[DAMAGE_GROUP[name]]) or nil
+                                            result[#result + 1] = {character = character, part = part, distance = distance, score = score, damage = damage}
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    table.sort(result, function(a, b)
+        if TARGET_PRIORITY == "Damage" then
+            local da, db = a.damage or -1, b.damage or -1
+            if da ~= db then return da > db end
+        end
+        if math.abs(a.score - b.score) > 1e-9 then return a.score > b.score end
+        return a.distance < b.distance
+    end)
+    return result
+end
+
+local function buildShot(properties, camera)
+    local center = camera.ViewportSize * 0.5
+    local origin = camera:ViewportPointToRay(center.X, center.Y).Origin
+    local range = math.min(tonumber(properties.Range) or 500, MAX_DISTANCE)
+    local penetration = properties.Penetration or 0
+    local targets = candidates(camera, origin, range, properties)
+    if #targets == 0 then return nil end
+    local ignored = ignoreList()
+    for _, target in ipairs(targets) do
+        local offset = target.part.Position - origin
+        if offset.Magnitude > 0.001 then
+            local direction = offset.Unit
+            local hits = Raycast.castThroughDistance(origin, direction * range, penetration, ignored)
+            local reached = false
+            for _, hit in ipairs(hits) do
+                if hit.instance == target.part then
+                    reached = true
+                    break
+                end
+                -- Wall check on: only an unobstructed first hit is accepted.
+                if WALL_CHECK then break end
+            end
+            if reached then
+                local shot = { Origin = origin, Direction = direction, Distance = range, Hits = {} }
+                if hits[1] then shot.Distance = (hits[1].position - origin).Magnitude end
+                for i, hit in ipairs(hits) do
+                    if hit.instance and hit.material then
+                        shot.Hits[#shot.Hits + 1] = {
+                            Position = hit.position, Instance = hit.instance,
+                            Material = hit.material.Name,
+                            Normal = hit.normal or Vector3.new(0, 0, 0),
+                            Exit = i % 2 == 0
+                        }
+                    end
+                end
+                return shot, target.character
+            end
+        end
+    end
+    return nil
+end
+
+
+-- One hook per session; disabling the toggle makes it delegate to the original.
+local env = type(getgenv) == "function" and getgenv() or nil
+if not env then warn("[Silent] getgenv недоступен") return end
+local previous = env.BlockStrikeMenuUI
+if previous and type(previous.unload) == "function" then pcall(function() previous:unload() end) end
+local state = env.BlockStrikeSilentMenuState
+if not state then
+    if type(hookfunction) ~= "function" then warn("[Silent] hookfunction недоступен") return end
+    state = {enabled = false, buildShot = buildShot, hitChance = 100}
+    local original
+    local ok, result = pcall(function()
+        return hookfunction(Bullet._performRaycast, function(self, spread)
+            if state.enabled and (state.hitChance or 100) > 0 and ((state.hitChance or 100) >= 100 or math.random(1, 100) <= state.hitChance) then
+                local success, shot, targetCharacter = pcall(function()
+                    local camera = workspace.CurrentCamera
+                    if camera and self.Properties then return state.buildShot(self.Properties, camera) end
+                end)
+                if success and shot then
+                    state.lastShotTarget = targetCharacter
+                    state.lastShotTargetTime = os.clock()
+                    return shot
+                end
+            end
+            return original(self, spread)
+        end)
+    end)
+    if not ok or type(result) ~= "function" then warn("[Silent] Ошибка hook: " .. tostring(result)) return end
+    original = result
+    env.BlockStrikeSilentMenuState = state
+else
+    state.enabled = false
+    state.buildShot = buildShot
+    state.hitChance = 100
+end
+
+local oldOverlay = player:WaitForChild("PlayerGui"):FindFirstChild("BlockStrikeFovOverlay")
+if oldOverlay then oldOverlay:Destroy() end
+local overlay = Instance.new("ScreenGui")
+overlay.Name = "BlockStrikeFovOverlay"
+overlay.IgnoreGuiInset = true
+overlay.ResetOnSpawn = false
+overlay.DisplayOrder = 10
+overlay.Parent = player.PlayerGui
+local circle = Instance.new("Frame")
+circle.Name = "FovCircle"
+circle.AnchorPoint = Vector2.new(0.5, 0.5)
+circle.BackgroundTransparency = 1
+circle.Visible = false
+circle.Parent = overlay
+local rounding = Instance.new("UICorner")
+rounding.CornerRadius = UDim.new(1, 0)
+rounding.Parent = circle
+local stroke = Instance.new("UIStroke")
+stroke.Thickness = 2
+stroke.Color = Color3.fromRGB(255, 255, 255)
+stroke.Parent = circle
+
+-- Separate outer outline; does not change the actual targeting radius.
+local outline = Instance.new("Frame")
+outline.Name = "OuterOutline"
+outline.AnchorPoint = Vector2.new(0.5, 0.5)
+outline.Position = UDim2.fromScale(0.5, 0.5)
+outline.BackgroundTransparency = 1
+outline.Visible = false
+outline.ZIndex = 1
+outline.Parent = circle
+local outlineCorner = Instance.new("UICorner")
+outlineCorner.CornerRadius = UDim.new(1, 0)
+outlineCorner.Parent = outline
+local outlineStroke = Instance.new("UIStroke")
+outlineStroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+outlineStroke.Color = Color3.fromRGB(0, 0, 0)
+outlineStroke.Thickness = 2
+outlineStroke.Transparency = 0
+outlineStroke.Parent = outline
+local function updateOutlineSize()
+    local extra = stroke.Thickness + outlineStroke.Thickness
+    outline.Size = UDim2.new(1, extra, 1, extra)
+end
+updateOutlineSize()
+
+-- Local glow made from soft, translucent concentric rings; no external asset.
+local glowEnabled, glowWidth, glowStrength, glowOpacity = false, 12, 45, 55
+local glowColor = Color3.fromRGB(255, 255, 255)
+local glowRings = {}
+for i = 1, 6 do
+    local ring = Instance.new("Frame")
+    ring.Name = "Glow" .. i
+    ring.AnchorPoint = Vector2.new(0.5, 0.5)
+    ring.Position = UDim2.fromScale(0.5, 0.5)
+    ring.BackgroundTransparency = 1
+    ring.ZIndex = 1
+    ring.Parent = circle
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = ring
+    local line = Instance.new("UIStroke")
+    line.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    line.Parent = ring
+    glowRings[i] = {frame = ring, stroke = line}
+end
+circle.ZIndex = 2
+local function updateGlow()
+    local count = #glowRings
+    for i, entry in ipairs(glowRings) do
+        local distance = (i - 0.5) * glowWidth / count
+        entry.frame.Size = UDim2.new(1, distance * 2, 1, distance * 2)
+        entry.frame.Visible = glowEnabled
+        entry.stroke.Color = glowColor
+        entry.stroke.Thickness = math.max(1, glowWidth / count + 1)
+        local fraction = (i - 1) / count
+        -- Strength controls how far the glow spreads; opacity controls visibility.
+        local falloff = (1 - fraction) ^ (3.5 - 3 * glowStrength / 100)
+        entry.stroke.Transparency = 1 - (glowOpacity / 100) * falloff
+    end
+end
+updateGlow()
+local lineColor = Color3.fromRGB(255, 255, 255)
+local fillColor = Color3.fromRGB(255, 255, 255)
+local outlineColor = Color3.fromRGB(0, 0, 0)
+local targetColor = Color3.fromRGB(255, 80, 80)
+local targetColorEnabled, targetFound = false, false
+local gradients = {}
+local function registerGradient(key, parent, first, second)
+    local g = Instance.new("UIGradient")
+    g.Enabled = false
+    g.Parent = parent
+    gradients[key] = {g = g, first = first, second = second, on = false}
+end
+registerGradient("line", stroke, lineColor, lineColor)
+registerGradient("fill", circle, fillColor, fillColor)
+registerGradient("outline", outlineStroke, outlineColor, outlineColor)
+for i, entry in ipairs(glowRings) do registerGradient("glow" .. i, entry.stroke, glowColor, glowColor) end
+local function applyGradient(key, primary)
+    local v = gradients[key]
+    v.first = primary
+    v.g.Color = ColorSequence.new(primary, v.second)
+    v.g.Enabled = v.on
+end
+local function refreshVisualColors()
+    local line = targetColorEnabled and targetFound and targetColor or lineColor
+    applyGradient("line", line)
+    stroke.Color = gradients.line.on and Color3.new(1, 1, 1) or line
+    applyGradient("fill", fillColor)
+    circle.BackgroundColor3 = gradients.fill.on and Color3.new(1, 1, 1) or fillColor
+    applyGradient("outline", outlineColor)
+    outlineStroke.Color = gradients.outline.on and Color3.new(1, 1, 1) or outlineColor
+    for i, entry in ipairs(glowRings) do
+        local key = "glow" .. i
+        applyGradient(key, glowColor)
+        entry.stroke.Color = gradients[key].on and Color3.new(1, 1, 1) or glowColor
+    end
+end
+local drawFov = false
+local lastVisible, lastCenter, lastRadius
+local function updateCircle()
+    local camera = workspace.CurrentCamera
+    local visible = drawFov and camera ~= nil
+    if visible ~= lastVisible then
+        circle.Visible = visible
+        lastVisible = visible
+    end
+    if not visible then return end
+    local center = camera.ViewportSize * 0.5
+    if center ~= lastCenter then
+        circle.Position = UDim2.fromOffset(center.X, center.Y)
+        lastCenter = center
+    end
+    if FOV_RADIUS ~= lastRadius then
+        circle.Size = UDim2.fromOffset(FOV_RADIUS * 2, FOV_RADIUS * 2)
+        lastRadius = FOV_RADIUS
+    end
+end
+local connection = RunService.RenderStepped:Connect(updateCircle)
+local ui = loadstring(game:HttpGet("https://raw.githubusercontent.com/Unwalker1337/shitaro-bloxstrike-ui-library/main/Library.lua"))()
+env.BlockStrikeMenuUI = ui
+ui:onunload(function()
+    state.enabled = false
+    connection:Disconnect()
+    overlay:Destroy()
+    if env.BlockStrikeMenuUI == ui then env.BlockStrikeMenuUI = nil end
+end)
+local window = ui:window({title = "Block Strike", script = "menu", folder = "block-strike-menu", key = "Insert", size = {620, 400}, font = false})
+-- Create all tabs before adding controls so a later error cannot prevent them appearing.
+local legit = window:tab({name = "legit", icon = "aim"})
+local rage = window:tab({name = "rage", icon = "target"})
+local visuals = window:tab({name = "visuals", icon = "eye"})
+local misc = window:tab({name = "misc", icon = "misc"})
+local settings = window:tab({name = "setting", icon = "settings"})
+legit:page("main"):section({name = "legit"})
+local rageSection = rage:page("main"):section({name = "aim"})
+local visualSection = visuals:page("main"):section({name = "visuals"})
+misc:page("main"):section({name = "misc"})
+settings:page("menu"):settings()
+settings:page("configs"):configs()
+local silentExtra
+local draw
+local previousDrawFov = false
+local lastSilentEnabled = false
+local silentControl = rageSection:toggle({name = "Silent aim", flag = "rage.silent", default = false, cb = function()
+    local enabled = ui:get("rage.silent") == true
+    state.enabled = enabled
+    if enabled ~= lastSilentEnabled then
+        if not enabled then
+            previousDrawFov = draw and ui:get("rage.draw_fov") == true or false
+            drawFov = false
+            if draw then draw:set(false, true) end
+        else
+            drawFov = previousDrawFov
+            if draw then draw:set(previousDrawFov, true) end
+        end
+        lastSilentEnabled = enabled
+    end
+    updateCircle()
+end})
+silentExtra = silentControl:settings({title = "Silent aim settings"})
+silentExtra:dropdown({name = "Target", flag = "rage.target_parts", values = TARGET_NAMES, multi = true, default = {"Head"}, cb = function(values)
+    local selected = {}
+    for _, name in ipairs(values) do selected[name] = true end
+    SELECTED = selected
+end})
+silentExtra:dropdown({name = "Priority", flag = "rage.target_priority", values = {"Damage", "Hit chance"}, default = "Hit chance", cb = function(value)
+    TARGET_PRIORITY = value
+end})
+silentExtra:toggle({name = "Wall check", flag = "rage.wall_check", default = false, cb = function(v) WALL_CHECK = v == true end})
+silentExtra:slider({name = "Hit chance", flag = "rage.hit_chance", min = 0, max = 100, default = 100, suffix = "%", cb = function(v) state.hitChance = v end})
+silentExtra:slider({name = "Max distance", flag = "rage.max_distance", min = 1, max = 1000, default = 500, suffix = " studs", cb = function(v) MAX_DISTANCE = v end})
+draw = rageSection:toggle({name = "Draw FOV", flag = "rage.draw_fov", default = false, cb = function()
+    local enabled = ui:get("rage.silent") == true
+    if not enabled then
+        drawFov = false
+        if draw then draw:set(false, true) end
+    else
+        drawFov = ui:get("rage.draw_fov") == true
+        previousDrawFov = drawFov
+    end
+    updateCircle()
+end})
+local extra = draw:settings({title = "FOV settings"})
+-- The library popup normally grows with its content. Give its control body
+-- a fixed-height scrolling child so all settings remain reachable on mobile.
+local scroll = Instance.new("ScrollingFrame")
+scroll.Name = "FovSettingsScroll"
+scroll.Size = UDim2.new(1, 0, 0, 240)
+scroll.BackgroundTransparency = 1
+scroll.BorderSizePixel = 0
+scroll.ScrollBarThickness = 4
+scroll.CanvasSize = UDim2.new()
+scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+scroll.LayoutOrder = 1
+scroll.Parent = extra.frame
+local list = Instance.new("UIListLayout")
+list.SortOrder = Enum.SortOrder.LayoutOrder
+list.Padding = UDim.new(0, 6)
+list.Parent = scroll
+extra.frame = scroll
+extra:slider({name = "Radius", flag = "rage.fov_radius", min = 20, max = 500, default = 180, suffix = " px", cb = function(value)
+    FOV_RADIUS = value
+    updateCircle()
+end})
+extra:colorpicker({name = "Color", flag = "rage.fov_color", default = Color3.fromRGB(255, 255, 255), cb = function(color)
+    lineColor = color
+    refreshVisualColors()
+end})
+extra:slider({name = "FOV line thickness", flag = "rage.fov_thickness", min = 1, max = 10, default = 2, suffix = " px", cb = function(value)
+    stroke.Thickness = value
+    updateOutlineSize()
+end})
+extra:slider({name = "FOV line transparency", flag = "rage.fov_outline_transparency", min = 0, max = 100, default = 0, suffix = "%", cb = function(value)
+    stroke.Transparency = value / 100
+end})
+extra:toggle({name = "Outline", flag = "rage.fov_outer_outline", default = false, cb = function(value)
+    outline.Visible = value == true
+end})
+extra:slider({name = "Outline opacity", flag = "rage.fov_outer_outline_opacity", min = 0, max = 100, default = 100, suffix = "%", cb = function(value)
+    outlineStroke.Transparency = 1 - value / 100
+end})
+extra:slider({name = "Outer outline thickness", flag = "rage.fov_outer_outline_thickness", min = 1, max = 10, default = 2, suffix = " px", cb = function(value)
+    outlineStroke.Thickness = value
+    updateOutlineSize()
+end})
+local fillEnabled, fillTransparency = false, 75
+circle.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+local function updateFill()
+    circle.BackgroundTransparency = fillEnabled and (fillTransparency / 100) or 1
+end
+extra:toggle({name = "Fill", flag = "rage.fov_fill", default = false, cb = function(value)
+    fillEnabled = value == true
+    updateFill()
+end})
+extra:slider({name = "Fill transparency", flag = "rage.fov_fill_transparency", min = 0, max = 100, default = 75, suffix = "%", cb = function(value)
+    fillTransparency = value
+    updateFill()
+end})
+extra:colorpicker({name = "Fill color", flag = "rage.fov_fill_color", default = Color3.fromRGB(255, 255, 255), cb = function(color)
+    fillColor = color
+    refreshVisualColors()
+end})
+extra:toggle({name = "Glow", flag = "rage.fov_glow", default = false, cb = function(value)
+    glowEnabled = value == true
+    updateGlow()
+    refreshVisualColors()
+end})
+extra:slider({name = "Glow size", flag = "rage.fov_glow_size", min = 2, max = 30, default = 12, suffix = " px", cb = function(value)
+    glowWidth = value
+    updateGlow()
+    refreshVisualColors()
+end})
+extra:slider({name = "Glow strength", flag = "rage.fov_glow_strength", min = 0, max = 100, default = 45, suffix = "%", cb = function(value)
+    glowStrength = value
+    updateGlow()
+    refreshVisualColors()
+end})
+extra:slider({name = "Glow opacity", flag = "rage.fov_glow_opacity", min = 0, max = 100, default = 55, suffix = "%", cb = function(value)
+    glowOpacity = value
+    updateGlow()
+    refreshVisualColors()
+end})
+extra:colorpicker({name = "Glow color", flag = "rage.fov_glow_color", default = Color3.fromRGB(255, 255, 255), cb = function(color)
+    glowColor = color
+    updateGlow()
+    refreshVisualColors()
+end})
+extra:toggle({name = "Target color", flag = "rage.fov_target_color_on", default = false, cb = function(v)
+    targetColorEnabled = v == true
+    refreshVisualColors()
+end})
+extra:colorpicker({name = "Target color", flag = "rage.fov_target_color", default = targetColor, cb = function(v)
+    targetColor = v
+    refreshVisualColors()
+end})
+extra:colorpicker({name = "Outline color", flag = "rage.fov_outer_outline_color", default = outlineColor, cb = function(v)
+    outlineColor = v
+    refreshVisualColors()
+end})
+local function addGradientSettings(label, key, defaultColor)
+    local keys = key == "glow" and {"glow1", "glow2", "glow3", "glow4", "glow5", "glow6"} or {key}
+    extra:toggle({name = label .. " gradient", flag = "rage.gradient_" .. key, default = false, cb = function(v)
+        for _, k in ipairs(keys) do gradients[k].on = v == true end
+        refreshVisualColors()
+    end})
+    extra:colorpicker({name = label .. " color 2", flag = "rage.gradient_" .. key .. "_color2", default = defaultColor, cb = function(v)
+        for _, k in ipairs(keys) do gradients[k].second = v end
+        refreshVisualColors()
+    end})
+end
+addGradientSettings("FOV line", "line", lineColor)
+addGradientSettings("Fill", "fill", fillColor)
+addGradientSettings("Outline", "outline", outlineColor)
+addGradientSettings("Glow", "glow", glowColor)
+
+-- Color reflects the same target/range/wall-penetration check as Silent aim.
+-- Recheck at most five times per second to limit mobile load.
+local lastTargetCheck = 0
+local targetConnection = RunService.Heartbeat:Connect(function()
+    if not state.enabled or not drawFov or not targetColorEnabled then
+        if targetFound then targetFound = false; refreshVisualColors() end
+        return
+    end
+    local now = os.clock()
+    if now - lastTargetCheck < 0.2 then return end
+    lastTargetCheck = now
+    local camera = workspace.CurrentCamera
+    local ok, found = pcall(function()
+        if not camera then return false end
+        local inventory = require(RS:WaitForChild("Controllers"):WaitForChild("InventoryController"))
+        local weapon = inventory.peekCurrentEquippedForMovement()
+        if not weapon or not weapon.IsEquipped or weapon.IsDestroyed or not weapon.Properties then
+            return false
+        end
+        return buildShot(weapon.Properties, camera) ~= nil
+    end)
+    found = ok and found or false
+    if found ~= targetFound then targetFound = found; refreshVisualColors() end
+end)
+ui:onunload(function() targetConnection:Disconnect() end)
+
+-- ESP uses only current Workspace characters. PVS models can have stale positions.
+local espEnabled = true
+local skeletonEnabled = true
+local headDotEnabled = true
+-- Weapon size is a percentage of projected ESP box width, not fixed pixels.
+local weaponEnabled, weaponSize, weaponSide = true, 80, "Auto"
+local weaponNameEnabled = true
+local ammoEnabled, ammoBarEnabled = true, true
+local ammoBarThickness = 2
+local ammoBarColor = Color3.fromRGB(67, 157, 255)
+local ammoBarOutline = true
+local magazineSizeCache = {}
+local function requestMagazineSize(name)
+    if type(name) ~= "string" or magazineSizeCache[name] ~= nil then return end
+    magazineSizeCache[name] = false -- also prevents duplicate tasks
+    task.spawn(function()
+        local database = RS:FindFirstChild("Database")
+        local custom = database and database:FindFirstChild("Custom")
+        local folder = custom and custom:FindFirstChild("Weapons")
+        local module = folder and folder:FindFirstChild(name)
+        if module and module:IsA("ModuleScript") then
+            local ok, properties = pcall(require, module)
+            local rounds = ok and type(properties) == "table" and tonumber(properties.Rounds)
+            if rounds and rounds > 0 then magazineSizeCache[name] = rounds end
+        end
+    end)
+end
+local HttpService = game:GetService("HttpService")
+local weaponIcons = {
+    ["AK-47"] = "rbxassetid://83097083839889",
+    ["AUG"] = "rbxassetid://119885531832389",
+    ["AWP"] = "rbxassetid://79794264811775",
+    ["Butterfly Knife"] = "rbxassetid://78088217065173",
+    ["C4"] = "rbxassetid://109858795365969",
+    ["CT Knife"] = "rbxassetid://115204080823353",
+    ["Decoy Grenade"] = "rbxassetid://81385239843859",
+    ["Desert Eagle"] = "rbxassetid://122477921917392",
+    ["Dual Berettas"] = "rbxassetid://111854065134079",
+    ["FAMAS"] = "rbxassetid://125469152582044",
+    ["Five-SeveN"] = "rbxassetid://90570942481875",
+    ["Flashbang"] = "rbxassetid://132038996524430",
+    ["Flip Knife"] = "rbxassetid://103569239379116",
+    ["Galil AR"] = "rbxassetid://75166557697975",
+    ["Glock-18"] = "rbxassetid://101406018897044",
+    ["Gut Knife"] = "rbxassetid://91965772008164",
+    ["HE Grenade"] = "rbxassetid://111110976385167",
+    ["Incendiary Grenade"] = "rbxassetid://81255981095065",
+    ["Karambit"] = "rbxassetid://85121618781867",
+    ["LightSaber"] = "rbxassetid://126330826978789",
+    ["M4A1-S"] = "rbxassetid://113144230602399",
+    ["M4A4"] = "rbxassetid://93053662997899",
+    ["M9 Bayonet"] = "rbxassetid://92481124554479",
+    ["MAC-10"] = "rbxassetid://83671879972945",
+    ["MAG-7"] = "rbxassetid://86291171438206",
+    ["MP9"] = "rbxassetid://135384625641866",
+    ["Molotov"] = "rbxassetid://95390644612614",
+    ["Negev"] = "rbxassetid://134163874921903",
+    ["Nova"] = "rbxassetid://127273982496076",
+    ["P250"] = "rbxassetid://73666032770570",
+    ["P90"] = "rbxassetid://82724138944322",
+    ["R8 Revolver"] = "rbxassetid://112745953600473",
+    ["SG 553"] = "rbxassetid://133547075528778",
+    ["SSG 08"] = "rbxassetid://112132914334737",
+    ["Sawed-Off"] = "rbxassetid://117478678996500",
+    ["Skeleton Knife"] = "rbxassetid://73573766861663",
+    ["Smoke Grenade"] = "rbxassetid://137305344844339",
+    ["Stiletto Knife"] = "rbxassetid://71208637985987",
+    ["T Knife"] = "rbxassetid://140484419446969",
+    ["Tec-9"] = "rbxassetid://119232881698906",
+    ["USP-S"] = "rbxassetid://131658947857971",
+    ["XM1014"] = "rbxassetid://115344320193773",
+    ["Zeus x27"] = "rbxassetid://71464446190434",
+}
+local arrowsEnabled, arrowSize = true, 28
+local arrowDistance = 35 -- percentage of the distance to the screen edge
+local arrowGlow, arrowGlowStrength, arrowGlowSize, arrowGlowTransparency = false, 50, 8, 30
+local arrowOutline, arrowOutlineColor, arrowOutlineTransparency = false, Color3.new(0, 0, 0), 0
+local arrowColor = Color3.fromRGB(255, 255, 255)
+-- Roblox "navigation-2" icon, a 2D upward-facing directional symbol.
+local arrowAsset = "rbxassetid://7734020942"
+local healthEnabled, healthNumber = true, true
+local healthSide, healthThickness, healthOutline = "Left", 2, true
+local healthRounding = 0
+local healthColor1, healthColor2, healthColor3 = Color3.fromRGB(80, 255, 120), Color3.fromRGB(168, 230, 95), Color3.fromRGB(255, 205, 70)
+local healthOutlineTransparency = 0
+local function healthGradientSequence()
+    -- Smoothstep interpolation adds intermediate colors around both transitions.
+    local keys = {}
+    for i = 0, 8 do
+        local t = i / 8
+        local a, b, u
+        if t <= 0.5 then a, b, u = healthColor1, healthColor2, t * 2
+        else a, b, u = healthColor2, healthColor3, (t - 0.5) * 2 end
+        local smooth = u * u * (3 - 2 * u)
+        keys[#keys + 1] = ColorSequenceKeypoint.new(t, a:Lerp(b, smooth))
+    end
+    return ColorSequence.new(keys)
+end
+local headDotStyle = {color = Color3.new(1, 1, 1), outline = true, outlineColor = Color3.new(0, 0, 0), fill = false, fillTransparency = 0.5}
+local nameEnabled, distanceEnabled, avatarEnabled = true, true, true
+local nameOutline, distanceOutline, skeletonOutline = true, true, true
+local avatarSharp, avatarOutline = false, false
+local avatarOutlineColor = Color3.new(0, 0, 0)
+local skeletonColor = Color3.new(1, 1, 1)
+local nameSide, distanceSide = "Auto", "Auto"
+local nameSize, distanceSize = 12, 12
+local espGui = Instance.new("ScreenGui")
+espGui.Name = "BlockStrikeBoxes"
+espGui.IgnoreGuiInset = true
+espGui.ResetOnSpawn = false
+espGui.DisplayOrder = 9
+espGui.Parent = player:WaitForChild("PlayerGui")
+local records = {}
+local featureNames = {"box", "skeleton", "headDot", "health", "name", "distance", "avatar", "arrows", "weapon", "ammo", "ammoBar"}
+local featureVisibility = {}
+for _, key in ipairs(featureNames) do
+    featureVisibility[key] = {check = false, only = false, visible = Color3.fromRGB(50, 255, 90), invisible = Color3.new(1, 1, 1)}
+end
+local paintRevision = 0
+local gradientStyles = {}
+for _, key in ipairs({"box", "skeleton", "headDot", "name", "distance", "avatar", "arrows", "weapon", "ammo", "ammoBar"}) do
+    gradientStyles[key] = {enabled = false, first = Color3.new(1, 1, 1), second = Color3.fromRGB(120, 190, 255)}
+end
+gradientStyles.ammoBar.first = ammoBarColor
+gradientStyles.ammoBar.second = Color3.fromRGB(150, 215, 255)
+local highlightSilent, highlightColor, silentTarget = true, Color3.fromRGB(255, 210, 40), nil
+local function invalidateVisualColors() paintRevision = paintRevision + 1 end
+local function effectiveColor(rec, original, key)
+    local gradient = gradientStyles[key]
+    if gradient and gradient.enabled then original = gradient.first end
+    if key == "box" and highlightSilent and rec.character == silentTarget then return highlightColor end
+    local cfg = featureVisibility[key]
+    if cfg and cfg.check then return rec.canHit == true and cfg.visible or cfg.invisible end
+    return original
+end
+local function applyGradientPaint(instance, property, key, primary)
+    local st = gradientStyles[key]
+    local gradient = instance:FindFirstChild("EspColorGradient")
+    if st.enabled then
+        if not gradient then
+            gradient = Instance.new("UIGradient")
+            gradient.Name = "EspColorGradient"
+            gradient.Rotation = 90
+            gradient.Parent = instance
+        end
+        gradient.Color = ColorSequence.new(primary, st.second)
+        gradient.Enabled = true
+        instance[property] = Color3.new(1, 1, 1)
+    else
+        if gradient then gradient.Enabled = false end
+        instance[property] = primary
+    end
+end
+local function featureVisible(rec, key)
+    local cfg = featureVisibility[key]
+    return not cfg.only or rec.canHit == true
+end
+local function installVisibilityOptions(extra, key)
+    local cfg = featureVisibility[key]
+    extra:toggle({name = "Visibility check", flag = "visuals."..key..".visibility", default = false, cb = function(v) cfg.check = v == true; invalidateVisualColors() end})
+    extra:toggle({name = "Visible only", flag = "visuals."..key..".visible_only", default = false, cb = function(v) cfg.only = v == true; invalidateVisualColors() end})
+    extra:colorpicker({name = "Visible color", flag = "visuals."..key..".visible_color", default = cfg.visible, cb = function(v) cfg.visible = v; invalidateVisualColors() end})
+    extra:colorpicker({name = "Invisible color", flag = "visuals."..key..".invisible_color", default = cfg.invisible, cb = function(v) cfg.invisible = v; invalidateVisualColors() end})
+    local gradient = gradientStyles[key]
+    if gradient then
+        extra:toggle({name = "Gradient", flag = "visuals."..key..".gradient", default = false, cb = function(v)
+            gradient.enabled = v == true
+            for _, rec in pairs(records) do rec.lastBoneColor = nil end
+            invalidateVisualColors()
+        end})
+        extra:colorpicker({name = "Gradient color 1", flag = "visuals."..key..".gradient1", default = gradient.first, cb = function(v)
+            gradient.first = v
+            for _, rec in pairs(records) do rec.lastBoneColor = nil end
+            invalidateVisualColors()
+        end})
+        extra:colorpicker({name = "Gradient color 2", flag = "visuals."..key..".gradient2", default = gradient.second, cb = function(v)
+            gradient.second = v
+            for _, rec in pairs(records) do rec.lastBoneColor = nil end
+            invalidateVisualColors()
+        end})
+    end
+end
+local function makeSettingsScrollable(extra, label)
+    local scroll = Instance.new("ScrollingFrame")
+    scroll.Name = label
+    scroll.Size = UDim2.new(1, 0, 0, 240)
+    scroll.BackgroundTransparency = 1
+    scroll.BorderSizePixel = 0
+    scroll.ScrollBarThickness = 4
+    scroll.CanvasSize = UDim2.new()
+    scroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+    scroll.ScrollingDirection = Enum.ScrollingDirection.Y
+    scroll.LayoutOrder = 1
+    scroll.Parent = extra.frame
+    local layout = Instance.new("UIListLayout")
+    layout.SortOrder = Enum.SortOrder.LayoutOrder
+    layout.Padding = UDim.new(0, 6)
+    layout.Parent = scroll
+    extra.frame = scroll
+end
+local bodyNames = TARGET_NAMES
+local boxStyle = {
+    color = Color3.fromRGB(255, 255, 255), transparency = 0, thickness = 0.5,
+    outline = true, outlineTransparency = 0.15, outlineThickness = 0.5,
+    glow = false, glowStrength = 50, glowSize = 8, glowTransparency = 0.3,
+    corners = false,
+}
+local function strokeFrame(parent, z)
+    local f = Instance.new("Frame")
+    f.BackgroundTransparency = 1
+    f.BorderSizePixel = 0
+    f.AnchorPoint = Vector2.new(0.5, 0.5)
+    f.Position = UDim2.fromScale(0.5, 0.5)
+    f.Size = UDim2.fromScale(1, 1)
+    f.ZIndex = z
+    f.Parent = parent
+    local line = Instance.new("UIStroke")
+    line.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    line.Parent = f
+    return f, line
+end
+local function makeBox()
+    local box = Instance.new("Frame")
+    box.Name = "Box"
+    box.BackgroundTransparency = 1
+    box.BorderSizePixel = 0
+    box.Visible = false
+    box.Parent = espGui
+    local rec = {frame = box, parts = {}, glows = {}, corners = {}}
+    local info = Instance.new("Frame")
+    info.Name = "Info"
+    info.BackgroundTransparency = 1
+    info.BorderSizePixel = 0
+    info.Visible = false
+    info.Parent = espGui
+    rec.info = info
+    local function makeLabel()
+        local label = Instance.new("TextLabel")
+        label.BackgroundTransparency = 1
+        label.BorderSizePixel = 0
+        label.Size = UDim2.fromOffset(200, 16)
+        label.TextColor3 = Color3.new(1, 1, 1)
+        label.TextStrokeColor3 = Color3.new(0, 0, 0)
+        label.TextStrokeTransparency = 0.25
+        label.Font = Enum.Font.Gotham
+        label.TextSize = 12
+        label.TextTruncate = Enum.TextTruncate.AtEnd
+        label.Parent = info
+        return label
+    end
+    rec.nameLabel, rec.distanceLabel = makeLabel(), makeLabel()
+    local weaponIcon = Instance.new("ImageLabel")
+    weaponIcon.Name = "WeaponIcon"
+    weaponIcon.AnchorPoint = Vector2.new(0.5, 0)
+    weaponIcon.Size = UDim2.fromOffset(1, 0.5)
+    weaponIcon.BackgroundTransparency = 1
+    weaponIcon.BorderSizePixel = 0
+    weaponIcon.ScaleType = Enum.ScaleType.Fit
+    weaponIcon.Visible = false
+    weaponIcon.Parent = info
+    local weaponLabel = Instance.new("TextLabel")
+    weaponLabel.Name = "WeaponName"
+    weaponLabel.AnchorPoint = Vector2.new(0.5, 0)
+    weaponLabel.Position = UDim2.new(0.5, 0, 1, 1)
+    weaponLabel.Size = UDim2.fromOffset(140, 14)
+    weaponLabel.BackgroundTransparency = 1
+    weaponLabel.BorderSizePixel = 0
+    weaponLabel.Text = ""
+    weaponLabel.TextColor3 = Color3.new(1, 1, 1)
+    weaponLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+    weaponLabel.TextStrokeTransparency = 0.25
+    weaponLabel.Font = Enum.Font.Gotham
+    weaponLabel.TextSize = 11
+    weaponLabel.TextTruncate = Enum.TextTruncate.AtEnd
+    weaponLabel.Parent = weaponIcon
+    local ammoLabel = Instance.new("TextLabel")
+    ammoLabel.Name = "Ammo"
+    ammoLabel.AnchorPoint = Vector2.new(0.5, 0)
+    ammoLabel.Position = UDim2.new(0.5, 0, 1, 15)
+    ammoLabel.Size = UDim2.fromOffset(100, 14)
+    ammoLabel.BackgroundTransparency = 1
+    ammoLabel.BorderSizePixel = 0
+    ammoLabel.Text = ""
+    ammoLabel.TextColor3 = Color3.new(1, 1, 1)
+    ammoLabel.TextStrokeColor3 = Color3.new(0, 0, 0)
+    ammoLabel.TextStrokeTransparency = 0.25
+    ammoLabel.Font = Enum.Font.Gotham
+    ammoLabel.TextSize = 11
+    ammoLabel.Parent = weaponIcon
+    rec.weaponIcon, rec.weaponLabel, rec.ammoLabel = weaponIcon, weaponLabel, ammoLabel
+    local health = Instance.new("Frame")
+    health.Name = "HealthBar"
+    health.BorderSizePixel = 0
+    health.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+    health.BackgroundTransparency = 0.25
+    health.Visible = false
+    health.ZIndex = 2
+    health.Parent = espGui
+    local healthEdge = Instance.new("UIStroke")
+    healthEdge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    healthEdge.Thickness = 1
+    healthEdge.Color = Color3.new(0, 0, 0)
+    healthEdge.Transparency = healthOutlineTransparency
+    healthEdge.Enabled = healthOutline
+    healthEdge.Parent = health
+    local healthFill = Instance.new("Frame")
+    healthFill.Name = "Fill"
+    healthFill.BorderSizePixel = 0
+    healthFill.BackgroundColor3 = Color3.new(1, 1, 1)
+    healthFill.ZIndex = 3
+    healthFill.Parent = health
+    local healthCorner = Instance.new("UICorner")
+    healthCorner.CornerRadius = UDim.new(healthRounding / 200, 0)
+    healthCorner.Parent = health
+    local fillCorner = Instance.new("UICorner")
+    fillCorner.CornerRadius = UDim.new(healthRounding / 200, 0)
+    fillCorner.Parent = healthFill
+    local gradient = Instance.new("UIGradient")
+    gradient.Color = healthGradientSequence()
+    gradient.Parent = healthFill
+    local number = Instance.new("TextLabel")
+    number.Name = "HealthNumber"
+    number.BackgroundTransparency = 1
+    number.BorderSizePixel = 0
+    number.Size = UDim2.fromOffset(32, 12)
+    number.TextColor3 = Color3.new(1, 1, 1)
+    number.TextStrokeColor3 = Color3.new(0, 0, 0)
+    number.TextStrokeTransparency = 0.1
+    number.Font = Enum.Font.GothamBold
+    number.TextSize = 10
+    number.ZIndex = 4
+    number.Parent = health
+    rec.healthBar, rec.healthFill, rec.healthGradient, rec.healthEdge, rec.healthNumber = health, healthFill, gradient, healthEdge, number
+    rec.healthCorner, rec.healthFillCorner = healthCorner, fillCorner
+    local ammoBar = Instance.new("Frame")
+    ammoBar.Name = "AmmoBar"
+    ammoBar.BorderSizePixel = 0
+    ammoBar.BackgroundColor3 = Color3.fromRGB(15, 18, 24)
+    ammoBar.BackgroundTransparency = 0.15
+    ammoBar.Visible = false
+    ammoBar.ZIndex = 2
+    ammoBar.Parent = espGui
+    local ammoBarEdge = Instance.new("UIStroke")
+    ammoBarEdge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    ammoBarEdge.Thickness = 0.5
+    ammoBarEdge.Color = Color3.new(0, 0, 0)
+    ammoBarEdge.Enabled = ammoBarOutline
+    ammoBarEdge.Parent = ammoBar
+    local ammoBarFill = Instance.new("Frame")
+    ammoBarFill.Name = "Fill"
+    ammoBarFill.BorderSizePixel = 0
+    ammoBarFill.BackgroundColor3 = ammoBarColor
+    ammoBarFill.ZIndex = 3
+    ammoBarFill.Size = UDim2.fromScale(1, 1)
+    ammoBarFill.Parent = ammoBar
+    rec.ammoBar, rec.ammoBarFill, rec.ammoBarEdge = ammoBar, ammoBarFill, ammoBarEdge
+    local avatar = Instance.new("ImageLabel")
+    avatar.Name = "Avatar"
+    avatar.BackgroundTransparency = 1
+    avatar.BorderSizePixel = 0
+    avatar.Size = UDim2.fromOffset(16, 16)
+    avatar.Visible = false
+    avatar.Parent = info
+    local avatarCorner = Instance.new("UICorner")
+    avatarCorner.CornerRadius = UDim.new(1, 0)
+    avatarCorner.Parent = avatar
+    local avatarEdge = Instance.new("UIStroke")
+    avatarEdge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    avatarEdge.Thickness = 1
+    avatarEdge.Color = avatarOutlineColor
+    avatarEdge.Enabled = avatarSharp and avatarOutline
+    avatarEdge.Parent = avatar
+    rec.avatar = avatar
+    local arrow = Instance.new("Frame")
+    arrow.Name = "OffscreenArrow"
+    arrow.AnchorPoint = Vector2.new(0.5, 0.5)
+    arrow.BackgroundTransparency = 1
+    arrow.BorderSizePixel = 0
+    arrow.Size = UDim2.fromOffset(arrowSize, arrowSize)
+    arrow.Visible = false
+    arrow.Parent = espGui
+    local function icon(z)
+        local im = Instance.new("ImageLabel")
+        im.AnchorPoint = Vector2.new(0.5, 0.5)
+        im.Position = UDim2.fromScale(0.5, 0.5)
+        im.Size = UDim2.fromScale(1, 1)
+        im.BackgroundTransparency = 1
+        im.Image = arrowAsset
+        im.ZIndex = z
+        im.Parent = arrow
+        return im
+    end
+    rec.arrow = arrow
+    rec.arrowMain = icon(4)
+    rec.arrowOutline = icon(3)
+    rec.arrowGlows = {icon(1), icon(1), icon(1), icon(1)}
+    local headDot = Instance.new("Frame")
+    headDot.Name = "HeadDot"
+    headDot.AnchorPoint = Vector2.new(0.5, 0.5)
+    headDot.Size = UDim2.fromOffset(10, 10)
+    headDot.BorderSizePixel = 0
+    headDot.BackgroundColor3 = headDotStyle.color
+    headDot.BackgroundTransparency = headDotStyle.fill and headDotStyle.fillTransparency or 1
+    headDot.Visible = false
+    headDot.Parent = espGui
+    local dotRound = Instance.new("UICorner")
+    dotRound.CornerRadius = UDim.new(1, 0)
+    dotRound.Parent = headDot
+    local dotOutline = Instance.new("UIStroke")
+    dotOutline.Color = headDotStyle.outlineColor
+    dotOutline.Thickness = 3
+    dotOutline.Enabled = headDotStyle.outline
+    dotOutline.Parent = headDot
+    local dotInnerFrame = Instance.new("Frame")
+    dotInnerFrame.BackgroundTransparency = 1
+    dotInnerFrame.BorderSizePixel = 0
+    dotInnerFrame.Size = UDim2.fromScale(1, 1)
+    dotInnerFrame.Parent = headDot
+    local dotInnerRound = Instance.new("UICorner")
+    dotInnerRound.CornerRadius = UDim.new(1, 0)
+    dotInnerRound.Parent = dotInnerFrame
+    local dotLine = Instance.new("UIStroke")
+    dotLine.Color = headDotStyle.color
+    dotLine.Thickness = 1
+    dotLine.Parent = dotInnerFrame
+    rec.headDot, rec.dotOutline, rec.dotLine = headDot, dotOutline, dotLine
+    rec.avatarCorner = avatarCorner
+    rec.avatarEdge = avatarEdge
+    avatarCorner.CornerRadius = avatarSharp and UDim.new(0, 0) or UDim.new(1, 0)
+    rec.outlineFrame, rec.outlineStroke = strokeFrame(box, 2)
+    rec.mainFrame, rec.mainStroke = strokeFrame(box, 3)
+    for i = 1, 4 do
+        local f, line = strokeFrame(box, 1)
+        rec.glows[i] = {frame = f, stroke = line}
+    end
+    -- Corner mode is intentionally made of eight short segments, not a full box.
+    for i = 1, 8 do
+        local f = Instance.new("Frame")
+        f.BorderSizePixel = 0
+        f.ZIndex = 3
+        f.Parent = box
+        local shadow = Instance.new("UIStroke")
+        shadow.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        shadow.Color = Color3.new(0, 0, 0)
+        shadow.Parent = f
+        local layers = {}
+        for j = 1, 3 do
+            local g, line = strokeFrame(f, 1)
+            layers[j] = {frame = g, stroke = line}
+        end
+        rec.corners[i] = {frame = f, outline = shadow, glows = layers}
+    end
+    return rec
+end
+local function applyBoxStyle(rec)
+    local st = boxStyle
+    local color = effectiveColor(rec, st.color, "box")
+    rec.mainFrame.Visible = not st.corners
+    applyGradientPaint(rec.mainStroke, "Color", "box", color)
+    rec.mainStroke.Transparency = st.transparency
+    rec.mainStroke.Thickness = st.thickness
+    rec.outlineFrame.Visible = not st.corners and st.outline
+    rec.outlineStroke.Color = Color3.new(0, 0, 0)
+    rec.outlineStroke.Transparency = st.outlineTransparency
+    rec.outlineStroke.Thickness = st.thickness + 2 * st.outlineThickness
+    for i, layer in ipairs(rec.glows) do
+        layer.frame.Visible = st.glow and not st.corners
+        local extra = st.glowSize * i / #rec.glows
+        layer.frame.Size = UDim2.new(1, extra * 2, 1, extra * 2)
+        applyGradientPaint(layer.stroke, "Color", "box", color)
+        layer.stroke.Thickness = math.max(1, st.glowSize / #rec.glows + 1)
+        local fade = (1 - (i - 1) / #rec.glows) ^ 2
+        layer.stroke.Transparency = 1 - (1 - st.glowTransparency) * (st.glowStrength / 100) * fade * 0.6
+    end
+    for i, corner in ipairs(rec.corners) do
+        local f = corner.frame
+        f.Visible = st.corners
+        applyGradientPaint(f, "BackgroundColor3", "box", color)
+        f.BackgroundTransparency = st.transparency
+        local right = i == 2 or i == 4 or i == 6 or i == 8
+        local bottom = i == 3 or i == 4 or i == 7 or i == 8
+        local horizontal = i <= 4
+        f.AnchorPoint = Vector2.new(right and 1 or 0, bottom and 1 or 0)
+        f.Position = UDim2.new(right and 1 or 0, 0, bottom and 1 or 0, 0)
+        -- Compact CS-style corners: short horizontals, slightly longer verticals.
+        f.Size = horizontal and UDim2.new(0.18, 0, 0, st.thickness) or UDim2.new(0, st.thickness, 0.22, 0)
+        corner.outline.Enabled = st.outline
+        corner.outline.Thickness = st.outlineThickness
+        corner.outline.Transparency = st.outlineTransparency
+        for j, layer in ipairs(corner.glows) do
+            layer.frame.Visible = st.glow
+            local extra = st.glowSize * j / #corner.glows
+            layer.frame.Size = UDim2.new(1, extra * 2, 1, extra * 2)
+            applyGradientPaint(layer.stroke, "Color", "box", color)
+            layer.stroke.Thickness = math.max(1, st.glowSize / #corner.glows + 1)
+            local fade = (1 - (j - 1) / #corner.glows) ^ 2
+            layer.stroke.Transparency = 1 - (1 - st.glowTransparency) * (st.glowStrength / 100) * fade * 0.6
+        end
+    end
+end
+local function refreshBoxes()
+    for _, rec in pairs(records) do applyBoxStyle(rec) end
+end
+local function applyArrowStyle(rec)
+    local color = effectiveColor(rec, arrowColor, "arrows")
+    applyGradientPaint(rec.arrowMain, "ImageColor3", "arrows", color)
+    rec.arrowOutline.ImageColor3 = arrowOutlineColor
+    rec.arrowOutline.ImageTransparency = arrowOutlineTransparency / 100
+    rec.arrowOutline.Visible = arrowOutline
+    rec.arrowOutline.Size = UDim2.new(1, 3, 1, 3)
+    for i, image in ipairs(rec.arrowGlows) do
+        local expand = arrowGlowSize * i / #rec.arrowGlows
+        image.Size = UDim2.new(1, expand * 2, 1, expand * 2)
+        applyGradientPaint(image, "ImageColor3", "arrows", color)
+        local falloff = (1 - (i - 1) / #rec.arrowGlows) ^ 2
+        image.ImageTransparency = 1 - (1 - arrowGlowTransparency / 100) * (arrowGlowStrength / 100) * falloff * 0.5
+        image.Visible = arrowGlow
+    end
+end
+local function refreshArrowStyles()
+    for _, rec in pairs(records) do applyArrowStyle(rec) end
+end
+local function clearBox(participant)
+    local rec = records[participant]
+    if rec then
+        rec.frame:Destroy()
+        if rec.skeleton then rec.skeleton:Destroy() end
+        if rec.info then rec.info:Destroy() end
+        if rec.headDot then rec.headDot:Destroy() end
+        if rec.arrow then rec.arrow:Destroy() end
+        if rec.healthBar then rec.healthBar:Destroy() end
+        if rec.ammoBar then rec.ammoBar:Destroy() end
+        if rec.drawLines then
+            for _, line in ipairs(rec.drawLines) do pcall(function() line:Remove() end) end
+        end
+        if rec.outlineLines then
+            for _, line in ipairs(rec.outlineLines) do pcall(function() line:Remove() end) end
+        end
+        if rec.gradientLines then
+            for _, lines in ipairs(rec.gradientLines) do for _, line in ipairs(lines) do pcall(function() line:Remove() end) end end
+        end
+        records[participant] = nil
+    end
+end
+local function updateParticipants()
+    local ok, all = pcall(Participants.GetAll)
+    if not ok or type(all) ~= "table" then return end
+    local mine = teamOf(player)
+    local keep = {}
+    for _, participant in ipairs(all) do
+        if participant ~= player then
+            local success, character = pcall(function()
+                if not Participants.IsAlive(participant) then return nil end
+                local team = teamOf(participant)
+                if mine == nil or team == nil or team == mine then return nil end
+                local model = Participants.Character(participant)
+                if model and model:IsA("Model") and model:IsDescendantOf(workspace)
+                    and model:GetAttribute("Dead") ~= true then return model end
+            end)
+            if success and character then
+                keep[participant] = true
+                local rec = records[participant]
+                if not rec then
+                    rec = makeBox()
+                    applyBoxStyle(rec)
+                    applyArrowStyle(rec)
+                    records[participant] = rec
+                end
+                if rec.character ~= character then
+                    rec.healthDisplayRatio = nil
+                    rec.canHit = nil
+                    rec.lastPaintRevision = nil
+                    rec.lastBoneColor = nil
+                end
+                rec.character = character
+                local equipped = participant:GetAttribute("CurrentEquipped")
+                local itemName, rounds
+                if type(equipped) == "string" then
+                    local decodeOk, data = pcall(HttpService.JSONDecode, HttpService, equipped)
+                    if decodeOk and type(data) == "table" then itemName = data.Name; rounds = tonumber(data.Rounds) end
+                end
+                if not itemName then itemName = participant:GetAttribute("WeaponName") end
+                local icon = type(itemName) == "string" and weaponIcons[itemName] or nil
+                rec.weaponName = itemName
+                rec.currentRounds = rounds
+                if rounds ~= nil then requestMagazineSize(itemName) end
+                local nameText = type(itemName) == "string" and itemName or ""
+                if rec.weaponLabel.Text ~= nameText then rec.weaponLabel.Text = nameText end
+                if rec.weaponIcon.Image ~= (icon or "") then rec.weaponIcon.Image = icon or "" end
+                local hp = tonumber(participant:GetAttribute("Health")) or tonumber(character:GetAttribute("Health"))
+                local maxHp = tonumber(participant:GetAttribute("MaxHealth")) or tonumber(character:GetAttribute("MaxHealth"))
+                rec.health = hp
+                rec.maxHealth = maxHp and maxHp > 0 and maxHp or nil
+                local uid = participant:IsA("Player") and participant.UserId or participant:GetAttribute("AvatarUserId")
+                uid = tonumber(uid)
+                if uid and uid > 0 then
+                    local avatarUrl = "rbxthumb://type=AvatarHeadShot&id=" .. math.floor(uid) .. "&w=150&h=150"
+                    if rec.avatar.Image ~= avatarUrl then rec.avatar.Image = avatarUrl end
+                elseif rec.avatar.Image ~= "" then
+                    rec.avatar.Image = ""
+                end
+                rec.displayName = participant:IsA("Player") and participant.Name or (participant:GetAttribute("DisplayName") or participant.Name)
+                local parts = {}
+                for _, name in ipairs(bodyNames) do
+                    local part = character:FindFirstChild(name)
+                    if part and part:IsA("BasePart") then parts[#parts + 1] = part end
+                end
+                rec.parts = parts
+            end
+        end
+    end
+    local remove = {}
+    for participant in pairs(records) do
+        if not keep[participant] then remove[#remove + 1] = participant end
+    end
+    for _, participant in ipairs(remove) do clearBox(participant) end
+end
+local elapsed = 1
+local espConnection = RunService.Heartbeat:Connect(function(dt)
+    if not espEnabled and not skeletonEnabled and not headDotEnabled and not nameEnabled and not distanceEnabled and not avatarEnabled and not healthEnabled and not arrowsEnabled and not weaponEnabled and not ammoEnabled and not ammoBarEnabled then return end
+    elapsed = elapsed + dt
+    if elapsed < 0.3 then return end
+    elapsed = 0
+    updateParticipants()
+end)
+local renderName = "BlockStrikeBoxESP"
+RunService:BindToRenderStep(renderName, Enum.RenderPriority.Camera.Value + 2, function(dt)
+    local camera = workspace.CurrentCamera
+    for _, rec in pairs(records) do
+        local box = rec.frame
+        if rec.lastPaintRevision ~= paintRevision or rec.lastPaintHit ~= rec.canHit or rec.lastPaintTarget ~= (rec.character == silentTarget) then
+            rec.lastPaintRevision, rec.lastPaintHit, rec.lastPaintTarget = paintRevision, rec.canHit, (rec.character == silentTarget)
+            applyBoxStyle(rec)
+            applyArrowStyle(rec)
+            local dotColor = effectiveColor(rec, headDotStyle.color, "headDot")
+            applyGradientPaint(rec.dotLine, "Color", "headDot", dotColor)
+            applyGradientPaint(rec.headDot, "BackgroundColor3", "headDot", dotColor)
+            local white = Color3.new(1, 1, 1)
+            applyGradientPaint(rec.nameLabel, "TextColor3", "name", effectiveColor(rec, white, "name"))
+            applyGradientPaint(rec.distanceLabel, "TextColor3", "distance", effectiveColor(rec, white, "distance"))
+            applyGradientPaint(rec.avatar, "ImageColor3", "avatar", effectiveColor(rec, white, "avatar"))
+            applyGradientPaint(rec.weaponIcon, "ImageColor3", "weapon", effectiveColor(rec, white, "weapon"))
+            applyGradientPaint(rec.weaponLabel, "TextColor3", "weapon", effectiveColor(rec, white, "weapon"))
+            applyGradientPaint(rec.ammoLabel, "TextColor3", "ammo", effectiveColor(rec, white, "ammo"))
+            applyGradientPaint(rec.ammoBarFill, "BackgroundColor3", "ammoBar", effectiveColor(rec, ammoBarColor, "ammoBar"))
+            local hc = effectiveColor(rec, white, "health")
+            rec.healthGradient.Color = featureVisibility.health.check and ColorSequence.new(hc, hc) or healthGradientSequence()
+        end
+        if (not espEnabled and not nameEnabled and not distanceEnabled and not avatarEnabled and not healthEnabled and not weaponEnabled and not ammoEnabled and not ammoBarEnabled) or not camera or not rec.character:IsDescendantOf(workspace) then
+            box.Visible = false
+            rec.info.Visible = false
+            rec.healthBar.Visible = false
+            rec.ammoBar.Visible = false
+        else
+            local minX, minY, maxX, maxY = math.huge, math.huge, -math.huge, -math.huge
+            local any = false
+            for _, part in ipairs(rec.parts) do
+                if part.Parent == rec.character then
+                    local cf, half = part.CFrame, part.Size * 0.5
+                    for x = -1, 1, 2 do
+                        for y = -1, 1, 2 do
+                            for z = -1, 1, 2 do
+                                local world = cf:PointToWorldSpace(Vector3.new(half.X*x, half.Y*y, half.Z*z))
+                                local point = camera:WorldToViewportPoint(world)
+                                if point.Z > 0.2 then
+                                    minX, minY = math.min(minX, point.X), math.min(minY, point.Y)
+                                    maxX, maxY = math.max(maxX, point.X), math.max(maxY, point.Y)
+                                    any = true
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+            local size = camera.ViewportSize
+            local visible = any and maxX >= 0 and maxY >= 0 and minX <= size.X and minY <= size.Y
+                and maxX - minX < size.X * 3 and maxY - minY < size.Y * 3
+            if visible then
+                local x, y = math.floor(minX + 0.5), math.floor(minY + 0.5)
+                local w, h = math.max(1, math.floor(maxX - minX + 0.5)), math.max(1, math.floor(maxY - minY + 0.5))
+                if rec.lastX ~= x or rec.lastY ~= y then
+                    local position = UDim2.fromOffset(x, y)
+                    box.Position, rec.info.Position = position, position
+                    rec.lastX, rec.lastY = x, y
+                end
+                if rec.lastW ~= w or rec.lastH ~= h then
+                    local size = UDim2.fromOffset(w, h)
+                    box.Size, rec.info.Size = size, size
+                    rec.lastW, rec.lastH = w, h
+                end
+                rec.nameLabel.Text = tostring(rec.displayName or "")
+                local root = rec.character:FindFirstChild("HumanoidRootPart") or rec.character:FindFirstChild("Head")
+                if root and root:IsA("BasePart") then
+                    rec.distanceLabel.Text = string.format("%.0f studs", (root.Position - camera.CFrame.Position).Magnitude)
+                else rec.distanceLabel.Text = "" end
+                rec.nameLabel.Visible = nameEnabled and featureVisible(rec, "name")
+                rec.distanceLabel.Visible = distanceEnabled and root ~= nil and featureVisible(rec, "distance")
+                rec.nameLabel.TextSize = nameSize
+                rec.distanceLabel.TextSize = distanceSize
+                rec.nameLabel.TextStrokeTransparency = nameOutline and 0.25 or 1
+                rec.distanceLabel.TextStrokeTransparency = distanceOutline and 0.25 or 1
+                local maxAmmo = rec.weaponName and magazineSizeCache[rec.weaponName]
+                local barRoom = ammoBarEnabled and featureVisible(rec, "ammoBar") and rec.currentRounds ~= nil and type(maxAmmo) == "number" and 5 or 0
+                local ns = nameSide == "Auto" and "Top" or nameSide
+                local ds = distanceSide == "Auto" and "Bottom" or distanceSide
+                local function place(label, side, extra, textSize)
+                    local h = textSize + 4
+                    label.Size = UDim2.fromOffset(200, h)
+                    if side == "Top" then
+                        label.AnchorPoint = Vector2.new(0.5, 1)
+                        label.Position = UDim2.new(0.5, 0, 0, -3 - extra)
+                        label.TextXAlignment = Enum.TextXAlignment.Center
+                    elseif side == "Bottom" then
+                        label.AnchorPoint = Vector2.new(0.5, 0)
+                        label.Position = UDim2.new(0.5, 0, 1, 3 + extra + barRoom)
+                        label.TextXAlignment = Enum.TextXAlignment.Center
+                    elseif side == "Left" then
+                        label.AnchorPoint = Vector2.new(1, 0)
+                        label.Position = UDim2.new(0, -4, 0, extra)
+                        label.TextXAlignment = Enum.TextXAlignment.Right
+                    else
+                        label.AnchorPoint = Vector2.new(0, 0)
+                        label.Position = UDim2.new(1, 4, 0, extra)
+                        label.TextXAlignment = Enum.TextXAlignment.Left
+                    end
+                end
+                place(rec.nameLabel, ns, 0, nameSize)
+                place(rec.distanceLabel, ds, (nameEnabled or avatarEnabled) and ns == ds and (nameSize + 4) or 0, distanceSize)
+                -- Compute icon location from label alignment, so it follows the name.
+                local name = rec.nameLabel
+                local width = 200
+                local textWidth = math.min(name.TextBounds.X, width)
+                local left
+                if name.TextXAlignment == Enum.TextXAlignment.Left then
+                    left = -name.AnchorPoint.X * width
+                elseif name.TextXAlignment == Enum.TextXAlignment.Right then
+                    left = (1 - name.AnchorPoint.X) * width - textWidth
+                else
+                    left = (0.5 - name.AnchorPoint.X) * width - textWidth / 2
+                end
+                local h = nameSize + 4
+                local pos = name.Position
+                rec.avatar.Position = UDim2.new(pos.X.Scale, pos.X.Offset + left - 19,
+                    pos.Y.Scale, pos.Y.Offset - name.AnchorPoint.Y * h + (h - 16) * 0.5)
+                rec.avatar.Visible = avatarEnabled and rec.avatar.Image ~= "" and featureVisible(rec, "avatar")
+                local ws = weaponSide == "Auto" and "Bottom" or weaponSide
+                local occupied = 0
+                if nameEnabled and ns == ws then occupied = occupied + nameSize + 4 end
+                if distanceEnabled and ds == ws then occupied = occupied + distanceSize + 4 end
+                local icon = rec.weaponIcon
+                -- Shrinks with the player at distance and grows when approaching.
+                local projectedWidth = math.max(0, maxX - minX)
+                -- Keep distant icons readable without losing distance-based scaling.
+                local iconWidth = math.clamp(projectedWidth * weaponSize / 100, 18, size.X)
+                icon.Size = UDim2.fromOffset(iconWidth, iconWidth * 0.5)
+                local textSize = math.clamp(iconWidth * 0.25, 8, 12)
+                rec.weaponLabel.TextSize = textSize
+                local showWeapon = weaponEnabled and icon.Image ~= "" and featureVisible(rec, "weapon")
+                rec.weaponLabel.Visible = showWeapon and weaponNameEnabled and rec.weaponLabel.Text ~= ""
+                local rounds = rec.currentRounds
+                local maxRounds = rec.weaponName and magazineSizeCache[rec.weaponName]
+                local showAmmo = ammoEnabled and rounds ~= nil and featureVisible(rec, "ammo")
+                rec.ammoLabel.Visible = showAmmo
+                rec.ammoLabel.TextSize = textSize
+                rec.ammoLabel.Position = UDim2.new(0.5, 0, 1, rec.weaponLabel.Visible and (textSize + 5) or 1)
+                if rounds ~= nil then
+                    rec.ammoLabel.Text = string.format("%d / %s", math.max(0, math.floor(rounds)), type(maxRounds) == "number" and tostring(math.floor(maxRounds)) or "?")
+                end
+                icon.ImageTransparency = showWeapon and 0 or 1
+                if ws == "Top" then
+                    icon.AnchorPoint = Vector2.new(0.5, 1)
+                    icon.Position = UDim2.new(0.5, 0, 0, -5 - occupied)
+                elseif ws == "Bottom" then
+                    icon.AnchorPoint = Vector2.new(0.5, 0)
+                    icon.Position = UDim2.new(0.5, 0, 1, 5 + occupied + barRoom)
+                elseif ws == "Left" then
+                    icon.AnchorPoint = Vector2.new(1, 0)
+                    icon.Position = UDim2.new(0, -5, 0, occupied)
+                else
+                    icon.AnchorPoint = Vector2.new(0, 0)
+                    icon.Position = UDim2.new(1, 5, 0, occupied)
+                end
+                icon.Visible = showWeapon or showAmmo
+            end
+            rec.info.Visible = visible and (nameEnabled or distanceEnabled or avatarEnabled or weaponEnabled or ammoEnabled)
+            box.Visible = visible and espEnabled and featureVisible(rec, "box")
+            local rounds = rec.currentRounds
+            local maxAmmo = rec.weaponName and magazineSizeCache[rec.weaponName]
+            local showAmmoBar = visible and ammoBarEnabled and featureVisible(rec, "ammoBar") and type(rounds) == "number" and type(maxAmmo) == "number" and maxAmmo > 0
+            rec.ammoBar.Visible = showAmmoBar
+            if showAmmoBar then
+                local target = math.clamp(rounds / maxAmmo, 0, 1)
+                if rec.lastAmmoWeapon ~= rec.weaponName or rec.ammoDisplayRatio == nil then
+                    rec.lastAmmoWeapon, rec.ammoDisplayRatio = rec.weaponName, target
+                end
+                local blend = 1 - math.exp(-10 * math.clamp(dt or 0, 0, 0.1))
+                rec.ammoDisplayRatio = rec.ammoDisplayRatio + (target - rec.ammoDisplayRatio) * blend
+                rec.ammoBar.Position = UDim2.fromOffset(minX, maxY + 3)
+                rec.ammoBar.Size = UDim2.fromOffset(math.max(1, maxX - minX), ammoBarThickness)
+                rec.ammoBarFill.Size = UDim2.fromScale(math.clamp(rec.ammoDisplayRatio, 0, 1), 1)
+            end
+            local hp, hpMax = rec.health, rec.maxHealth
+            local hpVisible = visible and healthEnabled and featureVisible(rec, "health") and hp ~= nil and hpMax ~= nil
+            local bar = rec.healthBar
+            bar.Visible = hpVisible
+            if hpVisible then
+                local x, y, w, h = minX, minY, maxX - minX, maxY - minY
+                local targetRatio = math.clamp(hp / hpMax, 0, 1)
+                if rec.healthDisplayRatio == nil then rec.healthDisplayRatio = targetRatio end
+                local alpha = 1 - math.exp(-10 * math.clamp(dt or 0, 0, 0.1))
+                rec.healthDisplayRatio = rec.healthDisplayRatio + (targetRatio - rec.healthDisplayRatio) * alpha
+                if math.abs(rec.healthDisplayRatio - targetRatio) < 0.001 then rec.healthDisplayRatio = targetRatio end
+                local ratio = rec.healthDisplayRatio
+                local vertical = healthSide == "Left" or healthSide == "Right"
+                if vertical then
+                    bar.Position = UDim2.fromOffset(healthSide == "Left" and (x - healthThickness - 4) or (maxX + 4), y)
+                    bar.Size = UDim2.fromOffset(healthThickness, h)
+                    rec.healthFill.AnchorPoint = Vector2.new(0, 1)
+                    rec.healthFill.Position = UDim2.fromScale(0, 1)
+                    rec.healthFill.Size = UDim2.fromScale(1, ratio)
+                    rec.healthNumber.AnchorPoint = Vector2.new(1, 0.5)
+                    rec.healthNumber.Position = UDim2.new(0, -3, 1 - ratio, 0)
+                    rec.healthNumber.TextXAlignment = Enum.TextXAlignment.Right
+                    rec.healthGradient.Rotation = 90
+                else
+                    bar.Position = UDim2.fromOffset(x, healthSide == "Top" and (y - healthThickness - 4) or (maxY + 4))
+                    bar.Size = UDim2.fromOffset(w, healthThickness)
+                    rec.healthFill.AnchorPoint = Vector2.new(0, 0)
+                    rec.healthFill.Position = UDim2.fromScale(0, 0)
+                    rec.healthFill.Size = UDim2.fromScale(ratio, 1)
+                    rec.healthNumber.AnchorPoint = Vector2.new(0.5, 1)
+                    rec.healthNumber.Position = UDim2.new(ratio, 0, 0, -2)
+                    rec.healthNumber.TextXAlignment = Enum.TextXAlignment.Center
+                    rec.healthGradient.Rotation = 0
+                end
+                rec.healthNumber.Text = string.format("%.0f", hp)
+                rec.healthNumber.Visible = healthNumber
+            end
+        end
+    end
+end)
+-- Skeleton uses projected part centres, and has its own switch.
+local bones = {
+    {"Head", "UpperTorso"}, {"UpperTorso", "LowerTorso"},
+    {"UpperTorso", "LeftUpperArm"}, {"LeftUpperArm", "LeftLowerArm"}, {"LeftLowerArm", "LeftHand"},
+    {"UpperTorso", "RightUpperArm"}, {"RightUpperArm", "RightLowerArm"}, {"RightLowerArm", "RightHand"},
+    {"LowerTorso", "LeftUpperLeg"}, {"LeftUpperLeg", "LeftLowerLeg"}, {"LeftLowerLeg", "LeftFoot"},
+    {"LowerTorso", "RightUpperLeg"}, {"RightUpperLeg", "RightLowerLeg"}, {"RightLowerLeg", "RightFoot"},
+}
+local drawingSupported = type(Drawing) == "table" and type(Drawing.new) == "function"
+local function makeSkeleton(rec)
+    if drawingSupported then
+        local lines, outlines = {}, {}
+        local ok = pcall(function()
+            for i = 1, #bones do
+                local line = Drawing.new("Line")
+                lines[#lines + 1] = line
+                line.Color = skeletonColor
+                line.Thickness = 1
+                line.Transparency = 1
+                line.Visible = false
+                local outline = Drawing.new("Line")
+                outlines[#outlines + 1] = outline
+                outline.Color = Color3.new(0, 0, 0)
+                outline.Thickness = 3
+                outline.Transparency = 1
+                outline.Visible = false
+                pcall(function() outline.ZIndex = 1; line.ZIndex = 2 end)
+            end
+        end)
+        if ok then rec.drawLines = lines; rec.outlineLines = outlines; return end
+        for _, line in ipairs(lines) do pcall(function() line:Remove() end) end
+        for _, line in ipairs(outlines) do pcall(function() line:Remove() end) end
+        drawingSupported = false
+    end
+    local root = Instance.new("Frame")
+    root.Name = "Skeleton"
+    root.Size = UDim2.fromScale(1, 1)
+    root.BackgroundTransparency = 1
+    root.BorderSizePixel = 0
+    root.Parent = espGui
+    rec.skeleton = root
+    rec.boneLines = {}
+    for i = 1, #bones do
+        local line = Instance.new("Frame")
+        line.Name = "Bone" .. i
+        line.AnchorPoint = Vector2.new(0.5, 0.5)
+        line.BorderSizePixel = 0
+        line.BackgroundColor3 = skeletonColor
+        line.Visible = false
+        line.Parent = root
+        local edge = Instance.new("UIStroke")
+        edge.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        edge.Color = Color3.new(0, 0, 0)
+        edge.Thickness = 1
+        edge.Enabled = skeletonOutline
+        edge.Parent = line
+        rec.boneLines[i] = line
+    end
+end
+local function ensureSkeletonGradientLines(rec)
+    if rec.gradientLines then return true end
+    local groups = {}
+    local ok = pcall(function()
+        for i = 1, #bones do
+            local group = {}
+            groups[i] = group
+            for j = 1, 3 do
+                local line = Drawing.new("Line")
+                group[j] = line
+                line.Thickness = 1
+                line.Transparency = 1
+                line.Visible = false
+                pcall(function() line.ZIndex = 2 end)
+            end
+        end
+    end)
+    if not ok then
+        for _, group in ipairs(groups) do for _, line in ipairs(group) do pcall(function() line:Remove() end) end end
+        return false
+    end
+    rec.gradientLines = groups
+    return true
+end
+local function hideSkeletonGradient(rec)
+    if rec.gradientLines then for _, group in ipairs(rec.gradientLines) do for _, line in ipairs(group) do line.Visible = false end end end
+end
+local skeletonRenderName = "BlockStrikeSkeletonESP"
+RunService:BindToRenderStep(skeletonRenderName, Enum.RenderPriority.Camera.Value + 2, function()
+    local camera = workspace.CurrentCamera
+    for _, rec in pairs(records) do
+        if not skeletonEnabled or not featureVisible(rec, "skeleton") or not camera or not rec.character:IsDescendantOf(workspace) then
+            if rec.skeleton then rec.skeleton.Visible = false end
+            if rec.drawLines then for _, line in ipairs(rec.drawLines) do line.Visible = false end end
+            if rec.outlineLines then for _, line in ipairs(rec.outlineLines) do line.Visible = false end end
+            hideSkeletonGradient(rec)
+        else
+            if not rec.skeleton and not rec.drawLines then makeSkeleton(rec) end
+            if rec.skeleton then rec.skeleton.Visible = true end
+            local boneColor = effectiveColor(rec, skeletonColor, "skeleton")
+            if rec.lastBoneColor ~= boneColor then
+                rec.lastBoneColor = boneColor
+                if rec.drawLines then for _, line in ipairs(rec.drawLines) do line.Color = boneColor end end
+                if rec.boneLines then for _, line in ipairs(rec.boneLines) do applyGradientPaint(line, "BackgroundColor3", "skeleton", boneColor) end end
+            end
+            local projected = {}
+            for _, part in ipairs(rec.parts) do
+                if part.Parent == rec.character then
+                    local point = camera:WorldToViewportPoint(part.Position)
+                    if point.Z > 0.2 then projected[part.Name] = Vector2.new(point.X, point.Y) end
+                end
+            end
+            for i, bone in ipairs(bones) do
+                local a, b = projected[bone[1]], projected[bone[2]]
+                local line = rec.drawLines and rec.drawLines[i] or rec.boneLines[i]
+                if a and b then
+                    if rec.drawLines then
+                        local gradientOn = gradientStyles.skeleton.enabled and ensureSkeletonGradientLines(rec)
+                        if gradientOn then
+                            local delta = b - a
+                            line.From, line.To = a, a + delta * 0.25
+                            line.Color = boneColor:Lerp(gradientStyles.skeleton.second, 0.125)
+                            for j, segment in ipairs(rec.gradientLines[i]) do
+                                segment.From, segment.To = a + delta * (j / 4), a + delta * ((j + 1) / 4)
+                                segment.Color = boneColor:Lerp(gradientStyles.skeleton.second, (j + 0.5) / 4)
+                                segment.Visible = true
+                            end
+                        else
+                            line.From, line.To = a, b
+                            line.Color = boneColor
+                            if rec.gradientLines then for _, segment in ipairs(rec.gradientLines[i]) do segment.Visible = false end end
+                        end
+                        local outer = rec.outlineLines[i]
+                        outer.From, outer.To = a, b
+                        outer.Visible = skeletonOutline
+                    else
+                        local delta = b - a
+                        local midpoint = (a + b) * 0.5
+                        line.Position = UDim2.fromOffset(midpoint.X, midpoint.Y)
+                        line.Size = UDim2.fromOffset(delta.Magnitude, 1)
+                        line.Rotation = math.deg(math.atan2(delta.Y, delta.X))
+                    end
+                    line.Visible = true
+                else
+                    line.Visible = false
+                    if rec.outlineLines then rec.outlineLines[i].Visible = false end
+                    if rec.gradientLines then for _, segment in ipairs(rec.gradientLines[i]) do segment.Visible = false end end
+                end
+            end
+        end
+    end
+end)
+local boxToggle = visualSection:toggle({name = "Box ESP", flag = "visuals.box", default = true, cb = function(value)
+    espEnabled = value == true
+    if not espEnabled then
+        for _, rec in pairs(records) do rec.frame.Visible = false end
+    else
+        elapsed = 1
+    end
+end})
+local boxExtra = boxToggle:settings({title = "Box settings"})
+-- Keep a touch-scrollable settings panel for small phone screens.
+local boxScroll = Instance.new("ScrollingFrame")
+boxScroll.Name = "BoxSettingsScroll"
+boxScroll.Size = UDim2.new(1, 0, 0, 240)
+boxScroll.BackgroundTransparency = 1
+boxScroll.BorderSizePixel = 0
+boxScroll.ScrollBarThickness = 4
+boxScroll.CanvasSize = UDim2.new()
+boxScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+boxScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+boxScroll.LayoutOrder = 1
+boxScroll.Parent = boxExtra.frame
+local boxList = Instance.new("UIListLayout")
+boxList.SortOrder = Enum.SortOrder.LayoutOrder
+boxList.Padding = UDim.new(0, 6)
+boxList.Parent = boxScroll
+boxExtra.frame = boxScroll
+installVisibilityOptions(boxExtra, "box")
+boxExtra:colorpicker({name = "Box color", flag = "visuals.box_color", default = boxStyle.color, cb = function(v) boxStyle.color = v; refreshBoxes() end})
+boxExtra:slider({name = "Box transparency", flag = "visuals.box_transparency", min = 0, max = 100, default = 0, suffix = "%", cb = function(v) boxStyle.transparency = v / 100; refreshBoxes() end})
+boxExtra:slider({name = "Box thickness", flag = "visuals.box_thickness", min = 0.25, max = 6, step = 0.25, dec = 2, default = 0.5, suffix = " px", cb = function(v) boxStyle.thickness = v; refreshBoxes() end})
+boxExtra:toggle({name = "Outline", flag = "visuals.box_outline", default = true, cb = function(v) boxStyle.outline = v == true; refreshBoxes() end})
+boxExtra:slider({name = "Outline transparency", flag = "visuals.box_outline_transparency", min = 0, max = 100, default = 15, suffix = "%", cb = function(v) boxStyle.outlineTransparency = v / 100; refreshBoxes() end})
+boxExtra:slider({name = "Outline thickness", flag = "visuals.box_outline_thickness", min = 0.25, max = 5, step = 0.25, dec = 2, default = 0.5, suffix = " px", cb = function(v) boxStyle.outlineThickness = v; refreshBoxes() end})
+boxExtra:toggle({name = "Glow", flag = "visuals.box_glow", default = false, cb = function(v) boxStyle.glow = v == true; refreshBoxes() end})
+boxExtra:slider({name = "Glow strength", flag = "visuals.box_glow_strength", min = 0, max = 100, default = 50, suffix = "%", cb = function(v) boxStyle.glowStrength = v; refreshBoxes() end})
+boxExtra:slider({name = "Glow size", flag = "visuals.box_glow_size", min = 1, max = 24, default = 8, suffix = " px", cb = function(v) boxStyle.glowSize = v; refreshBoxes() end})
+boxExtra:slider({name = "Glow transparency", flag = "visuals.box_glow_transparency", min = 0, max = 100, default = 30, suffix = "%", cb = function(v) boxStyle.glowTransparency = v / 100; refreshBoxes() end})
+boxExtra:toggle({name = "Corner boxes", flag = "visuals.box_corners", default = false, cb = function(v) boxStyle.corners = v == true; refreshBoxes() end})
+
+local skeletonToggle = visualSection:toggle({name = "Skeleton ESP", flag = "visuals.skeleton", default = true, cb = function(value)
+    skeletonEnabled = value == true
+    if not skeletonEnabled then
+        for _, rec in pairs(records) do
+            if rec.skeleton then rec.skeleton.Visible = false end
+            if rec.drawLines then for _, line in ipairs(rec.drawLines) do line.Visible = false end end
+            if rec.outlineLines then for _, line in ipairs(rec.outlineLines) do line.Visible = false end end
+            hideSkeletonGradient(rec)
+        end
+    else
+        elapsed = 1
+    end
+end})
+local skeletonExtra = skeletonToggle:settings({title = "Skeleton settings"})
+makeSettingsScrollable(skeletonExtra, "skeletonSettingsScroll")
+installVisibilityOptions(skeletonExtra, "skeleton")
+skeletonExtra:colorpicker({name = "Skeleton color", flag = "visuals.skeleton_color", default = skeletonColor, cb = function(color)
+    skeletonColor = color
+    for _, rec in pairs(records) do
+        local actual = effectiveColor(rec, color, "skeleton")
+        if rec.drawLines then for _, line in ipairs(rec.drawLines) do line.Color = actual end end
+        if rec.boneLines then for _, line in ipairs(rec.boneLines) do applyGradientPaint(line, "BackgroundColor3", "skeleton", actual) end end
+        rec.lastBoneColor = actual
+    end
+end})
+skeletonExtra:toggle({name = "Outline", flag = "visuals.skeleton_outline", default = true, cb = function(value)
+    skeletonOutline = value == true
+    for _, rec in pairs(records) do
+        if rec.outlineLines and not skeletonOutline then for _, line in ipairs(rec.outlineLines) do line.Visible = false end end
+        if rec.boneLines then for _, line in ipairs(rec.boneLines) do
+            local edge = line:FindFirstChildOfClass("UIStroke")
+            if edge then edge.Enabled = skeletonOutline end
+        end end
+    end
+end})
+local function applyHeadDotStyle(rec)
+    applyGradientPaint(rec.dotLine, "Color", "headDot", effectiveColor(rec, headDotStyle.color, "headDot"))
+    rec.dotOutline.Color = headDotStyle.outlineColor
+    rec.dotOutline.Enabled = headDotStyle.outline
+    applyGradientPaint(rec.headDot, "BackgroundColor3", "headDot", effectiveColor(rec, headDotStyle.color, "headDot"))
+    rec.headDot.BackgroundTransparency = headDotStyle.fill and headDotStyle.fillTransparency or 1
+end
+local function refreshHeadDots()
+    for _, rec in pairs(records) do applyHeadDotStyle(rec) end
+end
+local dotRenderName = "BlockStrikeHeadDotESP"
+RunService:BindToRenderStep(dotRenderName, Enum.RenderPriority.Camera.Value + 2, function()
+    local camera = workspace.CurrentCamera
+    for _, rec in pairs(records) do
+        local dot = rec.headDot
+        local head = rec.character:FindFirstChild("Head")
+        if headDotEnabled and featureVisible(rec, "headDot") and camera and rec.character:IsDescendantOf(workspace)
+            and head and head:IsA("BasePart") then
+            local point, onScreen = camera:WorldToViewportPoint(head.Position)
+            dot.Visible = onScreen and point.Z > 0.2
+            if dot.Visible then
+                -- Scale with the head's projected screen width rather than a fixed
+                -- number of pixels, so it shrinks when the opponent moves away.
+                local halfWidth = head.Size.X * 0.5
+                local right = camera.CFrame.RightVector * halfWidth
+                local a = camera:WorldToViewportPoint(head.Position - right)
+                local b = camera:WorldToViewportPoint(head.Position + right)
+                -- Match the full projected width of the head rather than 45%.
+                local diameter = math.clamp(math.abs(b.X - a.X), 1, camera.ViewportSize.Y * 2)
+                dot.Position = UDim2.fromOffset(point.X, point.Y)
+                dot.Size = UDim2.fromOffset(diameter, diameter)
+                local lineWidth = math.clamp(diameter * 0.10, 0.35, 1)
+                rec.dotLine.Thickness = lineWidth
+                rec.dotOutline.Thickness = lineWidth * 3
+            end
+        else
+            dot.Visible = false
+        end
+    end
+end)
+local dotToggle = visualSection:toggle({name = "Head dot", flag = "visuals.head_dot", default = true, cb = function(v)
+    headDotEnabled = v == true
+    if not headDotEnabled then
+        for _, rec in pairs(records) do rec.headDot.Visible = false end
+    else elapsed = 1 end
+end})
+local dotExtra = dotToggle:settings({title = "Head dot settings"})
+makeSettingsScrollable(dotExtra, "headDotSettingsScroll")
+installVisibilityOptions(dotExtra, "headDot")
+dotExtra:colorpicker({name = "Dot color", flag = "visuals.head_dot_color", default = headDotStyle.color, cb = function(v) headDotStyle.color = v; refreshHeadDots() end})
+dotExtra:toggle({name = "Head dot outline", flag = "visuals.head_dot_outline", default = true, cb = function(v) headDotStyle.outline = v == true; refreshHeadDots() end})
+dotExtra:colorpicker({name = "Outline color", flag = "visuals.head_dot_outline_color", default = headDotStyle.outlineColor, cb = function(v) headDotStyle.outlineColor = v; refreshHeadDots() end})
+dotExtra:toggle({name = "Fill", flag = "visuals.head_dot_fill", default = false, cb = function(v) headDotStyle.fill = v == true; refreshHeadDots() end})
+dotExtra:slider({name = "Fill transparency", flag = "visuals.head_dot_fill_transparency", min = 0, max = 100, default = 50, suffix = "%", cb = function(v) headDotStyle.fillTransparency = v / 100; refreshHeadDots() end})
+ui:onunload(function()
+    headDotEnabled = false
+    RunService:UnbindFromRenderStep(dotRenderName)
+end)
+
+local function refreshHealthStyle()
+    for _, rec in pairs(records) do
+        rec.healthEdge.Enabled = healthOutline
+        rec.healthEdge.Transparency = healthOutlineTransparency
+        local c = effectiveColor(rec, Color3.new(1, 1, 1), "health")
+        rec.healthGradient.Color = featureVisibility.health.check and ColorSequence.new(c, c) or healthGradientSequence()
+        local radius = UDim.new(healthRounding / 200, 0)
+        rec.healthCorner.CornerRadius = radius
+        rec.healthFillCorner.CornerRadius = radius
+    end
+end
+local hpToggle = visualSection:toggle({name = "Health bar", flag = "visuals.health", default = true, cb = function(v)
+    healthEnabled = v == true
+    if not healthEnabled then for _, rec in pairs(records) do rec.healthBar.Visible = false end else elapsed = 1 end
+end})
+local hpExtra = hpToggle:settings({title = "Health bar settings"})
+local hpScroll = Instance.new("ScrollingFrame")
+hpScroll.Name = "HealthSettingsScroll"
+hpScroll.Size = UDim2.new(1, 0, 0, 240)
+hpScroll.BackgroundTransparency = 1
+hpScroll.BorderSizePixel = 0
+hpScroll.ScrollBarThickness = 4
+hpScroll.CanvasSize = UDim2.new()
+hpScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+hpScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+hpScroll.LayoutOrder = 1
+hpScroll.Parent = hpExtra.frame
+local hpList = Instance.new("UIListLayout")
+hpList.SortOrder = Enum.SortOrder.LayoutOrder
+hpList.Padding = UDim.new(0, 6)
+hpList.Parent = hpScroll
+hpExtra.frame = hpScroll
+installVisibilityOptions(hpExtra, "health")
+hpExtra:dropdown({name = "Side", flag = "visuals.health_side", values = {"Left", "Right", "Top", "Bottom"}, default = "Left", cb = function(v) healthSide = v end})
+hpExtra:slider({name = "Thickness", flag = "visuals.health_thickness", min = 1, max = 10, default = 2, suffix = " px", cb = function(v) healthThickness = v end})
+hpExtra:colorpicker({name = "Gradient color 1", flag = "visuals.health_color1", default = healthColor1, cb = function(v) healthColor1 = v; refreshHealthStyle() end})
+hpExtra:colorpicker({name = "Gradient color 2", flag = "visuals.health_color2", default = healthColor2, cb = function(v) healthColor2 = v; refreshHealthStyle() end})
+hpExtra:colorpicker({name = "Gradient color 3", flag = "visuals.health_color3", default = healthColor3, cb = function(v) healthColor3 = v; refreshHealthStyle() end})
+hpExtra:slider({name = "Corner rounding", flag = "visuals.health_rounding", min = 0, max = 100, default = 0, suffix = "%", cb = function(v) healthRounding = v; refreshHealthStyle() end})
+hpExtra:toggle({name = "Outline", flag = "visuals.health_outline", default = true, cb = function(v) healthOutline = v == true; refreshHealthStyle() end})
+hpExtra:slider({name = "Outline transparency", flag = "visuals.health_outline_transparency", min = 0, max = 100, default = 0, suffix = "%", cb = function(v) healthOutlineTransparency = v / 100; refreshHealthStyle() end})
+hpExtra:toggle({name = "Health number", flag = "visuals.health_number", default = true, cb = function(v) healthNumber = v == true end})
+
+local nameToggle = visualSection:toggle({name = "Name ESP", flag = "visuals.name", default = true, cb = function(v)
+    nameEnabled = v == true
+    elapsed = 1
+end})
+local nameExtra = nameToggle:settings({title = "Name settings"})
+makeSettingsScrollable(nameExtra, "nameSettingsScroll")
+installVisibilityOptions(nameExtra, "name")
+nameExtra:dropdown({name = "Position", flag = "visuals.name_side", values = {"Auto", "Left", "Top", "Bottom", "Right"}, default = "Auto", cb = function(v) nameSide = v end})
+nameExtra:slider({name = "Text size", flag = "visuals.name_size", min = 8, max = 16, default = 12, suffix = " px", cb = function(v) nameSize = v end})
+nameExtra:toggle({name = "Text outline", flag = "visuals.name_outline", default = true, cb = function(v) nameOutline = v == true end})
+local distanceToggle = visualSection:toggle({name = "Distance ESP", flag = "visuals.distance", default = true, cb = function(v)
+    distanceEnabled = v == true
+    elapsed = 1
+end})
+local distanceExtra = distanceToggle:settings({title = "Distance settings"})
+makeSettingsScrollable(distanceExtra, "distanceSettingsScroll")
+installVisibilityOptions(distanceExtra, "distance")
+distanceExtra:dropdown({name = "Position", flag = "visuals.distance_side", values = {"Auto", "Left", "Top", "Bottom", "Right"}, default = "Auto", cb = function(v) distanceSide = v end})
+distanceExtra:slider({name = "Text size", flag = "visuals.distance_size", min = 8, max = 16, default = 12, suffix = " px", cb = function(v) distanceSize = v end})
+distanceExtra:toggle({name = "Text outline", flag = "visuals.distance_outline", default = true, cb = function(v) distanceOutline = v == true end})
+local weaponToggle = visualSection:toggle({name = "Weapon ESP", flag = "visuals.weapon", default = true, cb = function(value)
+    weaponEnabled = value == true
+    elapsed = 1
+end})
+local weaponExtra = weaponToggle:settings({title = "Weapon ESP settings"})
+makeSettingsScrollable(weaponExtra, "weaponSettingsScroll")
+installVisibilityOptions(weaponExtra, "weapon")
+weaponExtra:dropdown({name = "Position", flag = "visuals.weapon_side", values = {"Auto", "Top", "Bottom", "Left", "Right"}, default = "Auto", cb = function(value) weaponSide = value end})
+weaponExtra:slider({name = "Icon size", flag = "visuals.weapon_size", min = 25, max = 200, default = 80, suffix = "%", cb = function(value) weaponSize = value end})
+weaponExtra:toggle({name = "Weapon name", flag = "visuals.weapon_name", default = true, cb = function(value)
+    weaponNameEnabled = value == true
+    if not weaponNameEnabled then for _, rec in pairs(records) do rec.weaponLabel.Visible = false end end
+end})
+local ammoToggle = visualSection:toggle({name = "Ammo ESP", flag = "visuals.ammo", default = true, cb = function(value)
+    ammoEnabled = value == true
+    elapsed = 1
+    if not ammoEnabled then for _, rec in pairs(records) do rec.ammoLabel.Visible = false end end
+end})
+local ammoExtra = ammoToggle:settings({title = "Ammo ESP settings"})
+makeSettingsScrollable(ammoExtra, "ammoSettingsScroll")
+installVisibilityOptions(ammoExtra, "ammo")
+local ammoBarToggle = visualSection:toggle({name = "Ammo bar", flag = "visuals.ammo_bar", default = true, cb = function(v)
+    ammoBarEnabled = v == true
+    elapsed = 1
+    if not ammoBarEnabled then for _, rec in pairs(records) do rec.ammoBar.Visible = false end end
+end})
+local ammoBarExtra = ammoBarToggle:settings({title = "Ammo bar settings"})
+makeSettingsScrollable(ammoBarExtra, "ammoBarSettingsScroll")
+installVisibilityOptions(ammoBarExtra, "ammoBar")
+ammoBarExtra:colorpicker({name = "Bar color", flag = "visuals.ammo_bar_color", default = ammoBarColor, cb = function(v)
+    ammoBarColor = v
+    invalidateVisualColors()
+end})
+ammoBarExtra:slider({name = "Thickness", flag = "visuals.ammo_bar_thickness", min = 1, max = 6, default = 2, suffix = " px", cb = function(v) ammoBarThickness = v end})
+ammoBarExtra:toggle({name = "Outline", flag = "visuals.ammo_bar_outline", default = true, cb = function(v)
+    ammoBarOutline = v == true
+    for _, rec in pairs(records) do rec.ammoBarEdge.Enabled = ammoBarOutline end
+end})
+local avatarToggle = visualSection:toggle({name = "Avatar ESP", flag = "visuals.avatar", default = true, cb = function(v)
+    avatarEnabled = v == true
+    elapsed = 1
+end})
+local avatarExtra = avatarToggle:settings({title = "Avatar settings"})
+makeSettingsScrollable(avatarExtra, "avatarSettingsScroll")
+installVisibilityOptions(avatarExtra, "avatar")
+local function refreshAvatarStyle()
+    for _, rec in pairs(records) do
+        rec.avatarCorner.CornerRadius = avatarSharp and UDim.new(0, 0) or UDim.new(1, 0)
+        rec.avatarEdge.Enabled = avatarSharp and avatarOutline
+        rec.avatarEdge.Color = avatarOutlineColor
+    end
+end
+avatarExtra:toggle({name = "Sharp (square)", flag = "visuals.avatar_sharp", default = false, cb = function(v)
+    avatarSharp = v == true
+    refreshAvatarStyle()
+end})
+avatarExtra:toggle({name = "Sharp outline", flag = "visuals.avatar_outline", default = false, cb = function(v)
+    avatarOutline = v == true
+    refreshAvatarStyle()
+end})
+avatarExtra:colorpicker({name = "Outline color", flag = "visuals.avatar_outline_color", default = avatarOutlineColor, cb = function(v)
+    avatarOutlineColor = v
+    refreshAvatarStyle()
+end})
+-- Test one participant at a time. Casts use current weapon penetration; the
+-- client cannot know server armor, invulnerability or validation decisions.
+local visibilityAccumulator, visibilityIndex = 0, 0
+local visibilityConnection = RunService.Heartbeat:Connect(function(dt)
+    local needed = false
+    for _, cfg in pairs(featureVisibility) do if cfg.check or cfg.only then needed = true break end end
+    if not needed then return end
+    visibilityAccumulator = visibilityAccumulator + dt
+    if visibilityAccumulator < 0.15 then return end
+    visibilityAccumulator = 0
+    local current = {}
+    for _, rec in pairs(records) do current[#current + 1] = rec end
+    if #current == 0 then return end
+    visibilityIndex = visibilityIndex % #current + 1
+    local rec = current[visibilityIndex]
+    local ok, reachable = pcall(function()
+        local camera = workspace.CurrentCamera
+        if not camera or not rec.character:IsDescendantOf(workspace) then return false end
+        local controller = RS:FindFirstChild("Controllers")
+        local inventoryModule = controller and controller:FindFirstChild("InventoryController")
+        if not inventoryModule then return false end
+        local inventory = require(inventoryModule)
+        local weapon = inventory.peekCurrentEquippedForMovement()
+        if not weapon or not weapon.IsEquipped or weapon.IsDestroyed or not weapon.Properties then return false end
+        local props = weapon.Properties
+        local range = tonumber(props.Range) or 500
+        local penetration = tonumber(props.Penetration) or 0
+        local center = camera.ViewportSize * 0.5
+        local origin = camera:ViewportPointToRay(center.X, center.Y).Origin
+        local ignore = ignoreList()
+        for _, part in ipairs(rec.parts) do
+            if part.Parent == rec.character then
+                local delta = part.Position - origin
+                local distance = delta.Magnitude
+                if distance > 0.001 and distance <= range then
+                    local hits = Raycast.castThroughDistance(origin, delta.Unit * math.min(range, distance + 0.1), penetration, ignore)
+                    for _, hit in ipairs(hits) do
+                        if hit.instance and hit.instance:IsDescendantOf(rec.character) then return true end
+                    end
+                end
+            end
+        end
+        return false
+    end)
+    rec.canHit = ok and reachable == true
+end)
+ui:onunload(function() visibilityConnection:Disconnect() end)
+
+local silentHighlightToggle = visualSection:toggle({name = "Silent target highlight", flag = "visuals.silent_target", default = true, cb = function(v)
+    highlightSilent = v == true
+    if not highlightSilent then silentTarget = nil end
+    invalidateVisualColors()
+end})
+local silentHighlightSettings = silentHighlightToggle:settings({title = "Silent target"})
+silentHighlightSettings:colorpicker({name = "Target box color", flag = "visuals.silent_target_color", default = highlightColor, cb = function(v)
+    highlightColor = v
+    invalidateVisualColors()
+end})
+local targetElapsed = 0
+local silentTargetConnection = RunService.Heartbeat:Connect(function(dt)
+    if not highlightSilent or not state.enabled then
+        if silentTarget ~= nil then silentTarget = nil; invalidateVisualColors() end
+        return
+    end
+    targetElapsed = targetElapsed + dt
+    if targetElapsed < 0.35 then return end
+    targetElapsed = 0
+    local ok, found = pcall(function()
+        local camera = workspace.CurrentCamera
+        local controllers = RS:FindFirstChild("Controllers")
+        local invModule = controllers and controllers:FindFirstChild("InventoryController")
+        if not camera or not invModule then return nil end
+        local inv = require(invModule)
+        local weapon = inv.peekCurrentEquippedForMovement()
+        if not weapon or not weapon.IsEquipped or weapon.IsDestroyed or not weapon.Properties then return nil end
+        local _, character = buildShot(weapon.Properties, camera)
+        return character
+    end)
+    local newTarget = ok and found or nil
+    if silentTarget ~= newTarget then silentTarget = newTarget; invalidateVisualColors() end
+end)
+ui:onunload(function() silentTargetConnection:Disconnect() end)
+
+local arrowRenderName = "BlockStrikeOffscreenArrows"
+RunService:BindToRenderStep(arrowRenderName, Enum.RenderPriority.Camera.Value + 2, function()
+    local camera = workspace.CurrentCamera
+    for _, rec in pairs(records) do
+        local arrow = rec.arrow
+        local root = rec.character:FindFirstChild("HumanoidRootPart") or rec.character:FindFirstChild("Head")
+        if not arrowsEnabled or not featureVisible(rec, "arrows") or not camera or not rec.character:IsDescendantOf(workspace)
+            or not root or not root:IsA("BasePart") then
+            arrow.Visible = false
+        else
+            local projected, onScreen = camera:WorldToViewportPoint(root.Position)
+            if onScreen and projected.Z > 0 then
+                arrow.Visible = false
+            else
+                local viewport = camera.ViewportSize
+                local center = viewport * 0.5
+                local direction
+                if projected.Z > 0 then
+                    direction = Vector2.new(projected.X - center.X, projected.Y - center.Y)
+                else
+                    local relative = camera.CFrame:PointToObjectSpace(root.Position)
+                    direction = Vector2.new(relative.X, -relative.Y)
+                end
+                if direction.Magnitude < 0.001 then direction = Vector2.new(0, 1) end
+                direction = direction.Unit
+                local margin = arrowSize * 0.5 + 14
+                local halfW = math.max(1, center.X - margin)
+                local halfH = math.max(1, center.Y - margin)
+                local xScale = math.abs(direction.X) > 0.0001 and halfW / math.abs(direction.X) or math.huge
+                local yScale = math.abs(direction.Y) > 0.0001 and halfH / math.abs(direction.Y) or math.huge
+                local position = center + direction * math.min(xScale, yScale) * (arrowDistance / 100)
+                arrow.Position = UDim2.fromOffset(position.X, position.Y)
+                arrow.Rotation = math.deg(math.atan2(direction.Y, direction.X)) + 90
+                arrow.Visible = true
+            end
+        end
+    end
+end)
+local arrowsToggle = visualSection:toggle({name = "Offscreen arrows", flag = "visuals.arrows", default = true, cb = function(value)
+    arrowsEnabled = value == true
+    if not arrowsEnabled then
+        for _, rec in pairs(records) do rec.arrow.Visible = false end
+    else elapsed = 1 end
+end})
+local arrowsExtra = arrowsToggle:settings({title = "Offscreen arrows"})
+local arrowsScroll = Instance.new("ScrollingFrame")
+arrowsScroll.Name = "ArrowSettingsScroll"
+arrowsScroll.Size = UDim2.new(1, 0, 0, 240)
+arrowsScroll.BackgroundTransparency = 1
+arrowsScroll.BorderSizePixel = 0
+arrowsScroll.ScrollBarThickness = 4
+arrowsScroll.CanvasSize = UDim2.new()
+arrowsScroll.AutomaticCanvasSize = Enum.AutomaticSize.Y
+arrowsScroll.ScrollingDirection = Enum.ScrollingDirection.Y
+arrowsScroll.LayoutOrder = 1
+arrowsScroll.Parent = arrowsExtra.frame
+local arrowsList = Instance.new("UIListLayout")
+arrowsList.SortOrder = Enum.SortOrder.LayoutOrder
+arrowsList.Padding = UDim.new(0, 6)
+arrowsList.Parent = arrowsScroll
+arrowsExtra.frame = arrowsScroll
+installVisibilityOptions(arrowsExtra, "arrows")
+arrowsExtra:colorpicker({name = "Color", flag = "visuals.arrows_color", default = arrowColor, cb = function(value)
+    arrowColor = value
+    refreshArrowStyles()
+end})
+arrowsExtra:slider({name = "Size", flag = "visuals.arrows_size", min = 12, max = 64, default = 28, suffix = " px", cb = function(value)
+    arrowSize = value
+    for _, rec in pairs(records) do rec.arrow.Size = UDim2.fromOffset(value, value) end
+end})
+arrowsExtra:slider({name = "Distance from crosshair", flag = "visuals.arrows_distance", min = 5, max = 100, default = 35, suffix = "%", cb = function(v) arrowDistance = v end})
+arrowsExtra:toggle({name = "Glow", flag = "visuals.arrows_glow", default = false, cb = function(v) arrowGlow = v == true; refreshArrowStyles() end})
+arrowsExtra:slider({name = "Glow strength", flag = "visuals.arrows_glow_strength", min = 0, max = 100, default = 50, suffix = "%", cb = function(v) arrowGlowStrength = v; refreshArrowStyles() end})
+arrowsExtra:slider({name = "Glow size", flag = "visuals.arrows_glow_size", min = 1, max = 24, default = 8, suffix = " px", cb = function(v) arrowGlowSize = v; refreshArrowStyles() end})
+arrowsExtra:slider({name = "Glow transparency", flag = "visuals.arrows_glow_transparency", min = 0, max = 100, default = 30, suffix = "%", cb = function(v) arrowGlowTransparency = v; refreshArrowStyles() end})
+arrowsExtra:toggle({name = "Outline", flag = "visuals.arrows_outline", default = false, cb = function(v) arrowOutline = v == true; refreshArrowStyles() end})
+arrowsExtra:colorpicker({name = "Outline color", flag = "visuals.arrows_outline_color", default = arrowOutlineColor, cb = function(v) arrowOutlineColor = v; refreshArrowStyles() end})
+arrowsExtra:slider({name = "Outline transparency", flag = "visuals.arrows_outline_transparency", min = 0, max = 100, default = 0, suffix = "%", cb = function(v) arrowOutlineTransparency = v; refreshArrowStyles() end})
+ui:onunload(function()
+    arrowsEnabled = false
+    RunService:UnbindFromRenderStep(arrowRenderName)
+end)
+
+ui:onunload(function()
+    skeletonEnabled = false
+    RunService:UnbindFromRenderStep(skeletonRenderName)
+    for _, rec in pairs(records) do
+        if rec.drawLines then
+            for _, line in ipairs(rec.drawLines) do pcall(function() line:Remove() end) end
+            rec.drawLines = nil
+        end
+        if rec.outlineLines then
+            for _, line in ipairs(rec.outlineLines) do pcall(function() line:Remove() end) end
+            rec.outlineLines = nil
+        end
+        if rec.gradientLines then
+            for _, group in ipairs(rec.gradientLines) do for _, line in ipairs(group) do pcall(function() line:Remove() end) end end
+            rec.gradientLines = nil
+        end
+    end
+end)
+
+ui:onunload(function()
+    espEnabled = false
+    espConnection:Disconnect()
+    RunService:UnbindFromRenderStep(renderName)
+    espGui:Destroy()
+end)
+local espInitOk, espInitError = pcall(updateParticipants)
+if not espInitOk then warn("[Box ESP] initialization failed: " .. tostring(espInitError)) end
+
+
+end, function(err)
+    if type(debug) == "table" and type(debug.traceback) == "function" then
+        return debug.traceback(tostring(err), 2)
+    end
+    return tostring(err)
+end)
+if not startupOk then showStartupError(startupError) end
